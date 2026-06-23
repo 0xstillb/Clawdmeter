@@ -127,7 +127,7 @@ Runs natively on Windows — no WSL required. A system-tray app polls your usage
 
 - **Native Windows** (not WSL).
 - **Python 3.11+** from [python.org](https://www.python.org/downloads/) — check *"Add python.exe to PATH"* during install.
-- **Claude Code** installed, with `claude login` completed. The token is read from `%USERPROFILE%\.claude\.credentials.json` (falling back to `%LOCALAPPDATA%\Claude\` then `%APPDATA%\Claude\`).
+- **Claude Code and/or Codex** installed and signed in. Claude credentials are read from `%USERPROFILE%\.claude\.credentials.json` (falling back to `%LOCALAPPDATA%\Claude\` then `%APPDATA%\Claude\`); Codex auth is read from `%USERPROFILE%\.Codex\auth.json` or `%USERPROFILE%\.codex\auth.json`.
 - The repo on a **native Windows path** (e.g. `%USERPROFILE%\Clawdmeter`), **not** a `\\wsl$` share — the installer refuses a WSL path.
 
 ### Flash the firmware
@@ -140,17 +140,21 @@ Run `pio run -d firmware` with no env to see the available board envs.
 
 ### Pair the device
 
-The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Claude Controller". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
+The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Clawdmeter". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
 
 ### Install the daemon (recommended)
 
-From the repo root in PowerShell:
+Easiest path: double-click `Start Clawdmeter.cmd` from the repository folder.
+It creates/checks `.venv`, installs the Windows dependencies, enables Start at
+login, and starts the tray app without a console window.
+
+Manual path from the repo root in PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install-windows.ps1
 ```
 
-This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo requirements (no internet downloads), registers a per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray app headlessly (no console window).
+This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo requirements, registers a per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray app headlessly (no console window). `pip` may download those packages from PyPI if they are not already cached.
 
 ### Run manually instead (optional)
 
@@ -166,6 +170,7 @@ python daemon\claude_usage_daemon_windows.py        # runs in the foreground; Ct
 The icon's corner bubble shows state — **green** Connected, **amber** Scanning, **red** Error — and hovering shows the status (`Connected · last update HH:MM`). A notification fires once when it enters Error (e.g. an expired token). Right-click for the menu:
 
 - **Status header** — live state + last sync time.
+- **Provider** — switch Auto / Codex / Claude without restarting; the choice is saved under `%LOCALAPPDATA%\Clawdmeter\config.json`.
 - **Start at login** — toggle autostart on/off.
 - **Quit** — stops the daemon cleanly; leaves the Windows pairing intact (device keeps its last reading).
 
@@ -179,15 +184,17 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 | Symptom | Fix |
 |---------|-----|
 | `Device not found` | Power on the device; make sure it's in range and paired. |
+| `No usage source found` | Sign in with Claude Code and/or Codex on this Windows machine first. |
+| `Codex usage HTTP 401` | Sign in to Codex again so `auth.json` is refreshed. |
 | `token expired` toast / `API HTTP 401` | Re-run `claude login`, then restart the daemon. |
 | `Connection failed` | Toggle Windows Bluetooth off/on in Settings. |
 | `Warning: running under Linux/WSL` | Run from a native PowerShell window, not a WSL shell. |
 
 ## How it works
 
-1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux (`%USERPROFILE%\.claude\.credentials.json` on Windows).
-2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
-3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
+1. The daemon reads your usage-provider credentials. macOS/Linux currently read Claude Code OAuth credentials; Windows auto-selects Codex first when `auth.json` exists, then falls back to Claude.
+2. Claude polling makes a minimal API call to `api.anthropic.com/v1/messages`; Codex polling reads the ChatGPT/Codex usage endpoint with the local Codex OAuth token.
+3. The usage numbers are normalized into the same small BLE payload shape (`s`, `sr`, `w`, `wr`, `st`, `ok`, plus provider `p`).
 4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
 5. The firmware parses it and updates the LVGL dashboard.
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.

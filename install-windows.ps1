@@ -13,8 +13,9 @@
 # To disable autostart later: right-click the tray icon -> uncheck "Start at login"
 # Or remove manually: reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 #
-# Security: this script downloads nothing from the internet. It installs only
-# the packages listed in the in-repo daemon\requirements-windows.txt.
+# Security: this script installs only the packages listed in the in-repo
+# daemon\requirements-windows.txt. pip may download them from PyPI if they are
+# not already cached on the machine.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
