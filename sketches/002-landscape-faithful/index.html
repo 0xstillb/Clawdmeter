@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clawdmeter 2432S028 Landscape Mockup — Faithful</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #11110f;
+      --panel: #1f1f1e;
+      --panel-2: #242320;
+      --text: #faf9f5;
+      --dim: #b0aea5;
+      --accent: #d97757;
+      --green: #788c5d;
+      --amber: #d97757;
+      --track: #2a2a28;
+    }
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #242320 0%, #11110f 52%, #080807 100%);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .stage {
+      width: min(100%, 1040px);
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 28px;
+      align-items: center;
+    }
+    .notes { display: grid; gap: 14px; align-content: start; }
+    .notes h1 { font-size: 28px; line-height: 1.05; letter-spacing: -.03em; }
+    .notes p { color: #d7d3c8; line-height: 1.45; font-size: 14px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      border: 1px solid rgba(217,119,87,.35);
+      color: #f0c8b9;
+      background: rgba(217,119,87,.08);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .state-switch { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      color: var(--text);
+      background: #2a2a28;
+      transition: transform .14s ease, background .14s ease, color .14s ease;
+    }
+    button:hover { transform: translateY(-1px); background: #343430; }
+    button.active { background: var(--accent); color: #1b120f; }
+
+    .device-shell {
+      justify-self: center;
+      background: linear-gradient(180deg, #3a3a37 0%, #232321 100%);
+      padding: 16px;
+      border-radius: 26px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.45);
+    }
+    .device {
+      width: 320px;
+      height: 240px;
+      border-radius: 18px;
+      background: #000;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+      overflow: hidden;
+      position: relative;
+    }
+    .screen {
+      position: absolute;
+      inset: 0;
+      background: #000;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 32px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .logo-img {
+      width: 28px;
+      height: 28px;
+      object-fit: contain;
+      image-rendering: pixelated;
+      flex: 0 0 auto;
+    }
+    .title {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 28px;
+      letter-spacing: -.04em;
+      line-height: 1;
+      margin-top: 1px;
+    }
+    .battery {
+      font-size: 10px;
+      color: #e8c6b9;
+      opacity: .9;
+      margin-top: 2px;
+      padding: 5px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(217,119,87,.22);
+      background: rgba(217,119,87,.08);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      white-space: nowrap;
+    }
+    .usage {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+    .panel {
+      min-width: 0;
+      background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%);
+      border-radius: 8px;
+      padding: 10px 12px;
+      min-height: 132px;
+      position: relative;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+      display: grid;
+      gap: 6px;
+      align-content: start;
+    }
+    .pct-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .pct {
+      font-size: 36px;
+      line-height: .88;
+      letter-spacing: -.05em;
+      font-weight: 700;
+    }
+    .pill {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .03em;
+      color: #f4c9b9;
+      background: rgba(217,119,87,.16);
+      border: 1px solid rgba(217,119,87,.28);
+      border-radius: 999px;
+      padding: 5px 8px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .bar {
+      height: 14px;
+      border-radius: 6px;
+      background: var(--track);
+      overflow: hidden;
+      margin-top: 2px;
+    }
+    .fill { height: 100%; border-radius: 6px; transition: width .25s ease, background .25s ease; }
+    .meta {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 11px;
+      color: var(--dim);
+      line-height: 1.2;
+      margin-top: 2px;
+    }
+    .status {
+      margin-top: auto;
+      text-align: center;
+      font-size: 15px;
+      color: var(--accent);
+      letter-spacing: -.01em;
+    }
+    .pair, .idle {
+      display: none;
+      flex: 1;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 2px 12px 18px;
+    }
+    .pair-card, .idle-card {
+      width: 100%;
+      display: grid;
+      gap: 14px;
+      align-items: center;
+      justify-items: center;
+    }
+    .pair h2, .idle h2 {
+      font-size: 24px;
+      line-height: 1;
+      letter-spacing: -.04em;
+      font-weight: 700;
+    }
+    .pair p, .idle p {
+      font-size: 14px;
+      color: var(--dim);
+      line-height: 1.35;
+      max-width: 230px;
+    }
+    .sleepy-img {
+      width: 92px;
+      height: 92px;
+      object-fit: contain;
+      image-rendering: pixelated;
+      filter: drop-shadow(0 10px 24px rgba(0,0,0,.28));
+    }
+
+    .screen[data-state="usage"] .usage { display: grid; }
+    .screen[data-state="pair"] .pair { display: flex; }
+    .screen[data-state="pair"] .usage, .screen[data-state="pair"] .idle { display: none; }
+    .screen[data-state="idle"] .idle { display: flex; }
+    .screen[data-state="idle"] .usage, .screen[data-state="idle"] .pair { display: none; }
+
+    body.embed { padding: 0; background: #11110f; }
+    body.embed .stage { width: 100%; grid-template-columns: 1fr; }
+    body.embed .notes { display: none; }
+    body.embed .device-shell {
+      padding: 0;
+      background: transparent;
+      box-shadow: none;
+      border-radius: 0;
+    }
+
+    @media (max-width: 960px) {
+      .stage { grid-template-columns: 1fr; }
+      .notes { order: 2; }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <aside class="notes">
+      <div class="chips">
+        <span class="chip">landscape 320×240</span>
+        <span class="chip">same firmware semantics</span>
+        <span class="chip">side-by-side cards</span>
+      </div>
+      <h1>Landscape mockup — if the 2432S028 rotated to 320×240</h1>
+      <p>This version keeps the same Clawdmeter states and assets, but spends the extra width on side-by-side usage cards. The reset text gets more breathing room than portrait.</p>
+      <p>Trade-off: less vertical space for pairing and idle copy, so landscape wants shorter messages and tighter hierarchy.</p>
+      <div class="state-switch">
+        <button class="active" data-target="usage">Live usage</button>
+        <button data-target="pair">Pairing</button>
+        <button data-target="idle">Idle</button>
+      </div>
+    </aside>
+
+    <div class="device-shell">
+      <div class="device">
+        <div class="screen" id="screen" data-state="usage">
+          <div class="topbar">
+            <div class="brand">
+              <img class="logo-img" src="../assets/clawdmeter-logo.png" alt="Clawdmeter logo" />
+              <div class="title">Usage</div>
+            </div>
+            <div class="battery">no battery</div>
+          </div>
+
+          <div class="usage">
+            <section class="panel">
+              <div class="pct-row">
+                <div class="pct">37%</div>
+                <div class="pill">Current</div>
+              </div>
+              <div class="bar"><div class="fill" style="width:37%; background:#788c5d"></div></div>
+              <div class="meta">
+                <div>Live now</div>
+                <div>Resets in 2h 14m</div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="pct-row">
+                <div class="pct">62%</div>
+                <div class="pill">Weekly</div>
+              </div>
+              <div class="bar"><div class="fill" style="width:62%; background:#d97757"></div></div>
+              <div class="meta">
+                <div>Cap window</div>
+                <div>Resets in 3d 4h</div>
+              </div>
+            </section>
+          </div>
+
+          <div class="pair">
+            <div class="pair-card">
+              <h2>To pair</h2>
+              <p>Hold the BOOT button for 3 seconds, then release.</p>
+            </div>
+          </div>
+
+          <div class="idle">
+            <div class="idle-card">
+              <img class="sleepy-img" src="../assets/expression-sleep-frame0.png" alt="Original expression sleep character" />
+              <p>The host is connected and waiting for the next usage payload.</p>
+            </div>
+          </div>
+
+          <div class="status" id="status">✻ Accomplishing…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    if (window.self !== window.top) document.body.classList.add('embed');
+    const screen = document.getElementById('screen');
+    const status = document.getElementById('status');
+    const copy = {
+      usage: '✻ Accomplishing…',
+      pair: '· Waiting…',
+      idle: '✽ Listening…'
+    };
+    for (const button of document.querySelectorAll('button[data-target]')) {
+      button.addEventListener('click', () => {
+        for (const b of document.querySelectorAll('button[data-target]')) b.classList.remove('active');
+        button.classList.add('active');
+        const state = button.dataset.target;
+        screen.dataset.state = state;
+        status.textContent = copy[state];
+      });
+    }
+  </script>
+</body>
+</html>

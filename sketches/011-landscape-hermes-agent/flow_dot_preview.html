@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>flow_dot firmware preview</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #08090c;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: system-ui, sans-serif;
+  gap: 24px;
+}
+
+/* --- Simulates the Usage card's data-flow row --- */
+.data-flow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 8px;
+  padding: 12px 16px;
+  width: 280px;
+}
+
+.data-flow .track {
+  flex: 1;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.04);
+  overflow: hidden;
+}
+
+.data-flow .track .fill {
+  height: 100%;
+  width: 60%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(90,122,255,.0), rgba(90,122,255,.95), rgba(90,122,255,.0));
+  background-size: 200% 100%;
+  animation: dataStream 1.4s ease-in-out infinite;
+}
+
+.data-flow .pulse {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: #4a6df7;
+  box-shadow: 0 0 0 3px rgba(90,122,255,.14);
+  flex: 0 0 auto;
+  animation: dataDot 1.4s ease-in-out infinite;
+}
+
+@keyframes dataStream {
+  0%, 100% { transform: translateX(-30%); opacity: .3; }
+  50% { transform: translateX(30%); opacity: 1; }
+}
+
+/* Firmware-style: opacity only, NO transform/scale */
+@keyframes dataDot {
+  0%, 100% { opacity: .4; }
+  50% { opacity: 1; }
+}
+
+/* Label */
+.label {
+  color: rgba(255,255,255,.3);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+code {
+  color: rgba(255,255,255,.5);
+  font-size: 12px;
+  background: rgba(255,255,255,.04);
+  padding: 8px 14px;
+  border-radius: 6px;
+  max-width: 480px;
+  text-align: center;
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+  <div class="label">flow_dot — firmware preview (opacity only)</div>
+  <div class="data-flow">
+    <div class="pulse"></div>
+    <div class="track">
+      <div class="fill"></div>
+    </div>
+  </div>
+  <code>
+    lv_obj_set_style_opa(flow_dot, (lv_opa_t)(102 + (153 * tri) / 20), 0);<br>
+    tri = 0→20→0 → opa = 102(40%) ↔ 255(100%)<br>
+    → กระพริบนิ่งๆ ไม่ขยับ
+  </code>
+</body>
+</html>

@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Usage Variant B — Ring Dashboard</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0f1013;
+  --shell: #1a1c20;
+  --screen: #14161a;
+  --panel-edge: rgba(255,255,255,.07);
+  --text: #ece6db;
+  --muted: #ada89b;
+  --yellow: #ffd53d;
+  --blue: #4a6df7;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  color: var(--text);
+}
+.embed { padding: 0; background: #101216; }
+.frame {
+  background: var(--shell);
+  border-radius: 34px;
+  padding: 14px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 20px 40px rgba(0,0,0,.6);
+}
+.device {
+  position: relative;
+  width: 240px;
+  height: 320px;
+  border-radius: 22px;
+  overflow: hidden;
+}
+.screen {
+  position: absolute;
+  inset: 0;
+  padding: 12px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px),
+    radial-gradient(circle at top, rgba(74,109,247,.06) 0%, transparent 28%),
+    var(--screen);
+  background-size: 14px 14px, 14px 14px, auto, auto;
+}
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 68px;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+}
+.header-left {
+  width: 72px;
+  display: flex;
+  align-items: center;
+}
+.title {
+  flex: 1;
+  text-align: left;
+  padding-left: 8px;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -.035em;
+  white-space: pre-line;
+  line-height: 1.1;
+}
+.header-right {
+  width: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.agent-link {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: rgba(74,109,247,.12);
+  border: 1px solid rgba(74,109,247,.25);
+  box-shadow: inset 0 0 0 1px rgba(74,109,247,.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.agent-link.offline { background: rgba(255,153,102,.12); border-color: rgba(255,153,102,.25); }
+.slash {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background .2s;
+}
+.agent-link:not(.offline) .slash { background: var(--blue); }
+
+/* Variant B: Ring usage */
+.state { display: none; flex: 1; }
+.screen[data-state="usage"] .usage { display: flex; }
+
+.usage {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ring-card {
+  background: linear-gradient(180deg, rgba(28,31,38,.96), rgba(18,21,27,.96));
+  border: 1px solid var(--panel-edge);
+  border-radius: 16px;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+}
+
+.ring-wrap {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 auto;
+}
+.ring-wrap svg { transform: rotate(-90deg); }
+.ring-bg { fill: none; stroke: rgba(255,255,255,.06); stroke-width: 5; }
+.ring-fill {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s cubic-bezier(.4,0,.2,1);
+}
+.ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.ring-label .pct {
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+}
+.ring-label .sub {
+  font-size: 7px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-top: 2px;
+}
+
+.ring-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ring-info .label {
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.ring-info .value {
+  font-size: 13px;
+  font-weight: 600;
+}
+.ring-info .detail {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  color: var(--muted);
+}
+.pill-dot {
+  width: 4px; height: 4px;
+  border-radius: 999px;
+  background: #3a3c40;
+  flex: 0 0 auto;
+}
+.pill-dot.live { background: var(--blue); box-shadow: 0 0 0 2px rgba(74,109,247,.15); animation: dotPulse 2s ease-in-out infinite; }
+@keyframes dotPulse { 0%,100% { opacity: .6; } 50% { opacity: 1; } }
+
+/* Weekly mini-card */
+.mini-card {
+  background: linear-gradient(180deg, rgba(28,31,38,.96), rgba(18,21,27,.96));
+  border: 1px solid var(--panel-edge);
+  border-radius: 14px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mini-card .mini-label {
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  min-width: 60px;
+}
+.mini-card .mini-bar-wrap {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.04);
+  overflow: hidden;
+}
+.mini-card .mini-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #d5b83a, #ffd53d);
+  transition: width .7s cubic-bezier(.4,0,.2,1);
+  width: 0%;
+}
+.mini-card .mini-pct {
+  font-size: 14px;
+  font-weight: 700;
+  min-width: 34px;
+  text-align: right;
+}
+.mini-card .mini-reset {
+  font-size: 8px;
+  color: var(--muted);
+  min-width: 44px;
+  text-align: right;
+}
+</style>
+</head>
+<body>
+<div class="stage">
+<div class="frame">
+<div class="device">
+<div class="screen" id="screen" data-state="usage">
+  <div class="header">
+    <div class="header-left"></div>
+    <div class="title">Usage</div>
+    <div class="header-right">
+      <div class="agent-link" id="agentLink"><span class="slash"></span></div>
+    </div>
+  </div>
+
+  <div class="state usage">
+    <div class="ring-card">
+      <div class="ring-wrap">
+        <svg width="72" height="72" viewBox="0 0 72 72">
+          <circle class="ring-bg" cx="36" cy="36" r="30"/>
+          <circle class="ring-fill" id="ringArc" cx="36" cy="36" r="30" stroke="#4a6df7" stroke-dasharray="188.5" stroke-dashoffset="188.5"/>
+        </svg>
+        <div class="ring-label">
+          <div class="pct" id="ringPct">0%</div>
+          <div class="sub">current</div>
+        </div>
+      </div>
+      <div class="ring-info">
+        <div class="label">Current window</div>
+        <div class="value" id="ringVal">—</div>
+        <div class="detail"><span class="pill-dot live"></span>live_now</div>
+      </div>
+    </div>
+
+    <div class="mini-card">
+      <span class="mini-label">Weekly cap</span>
+      <div class="mini-bar-wrap"><div class="mini-bar-fill" id="miniBar" style="width:0%"></div></div>
+      <span class="mini-pct" id="miniPct">0%</span>
+      <span class="mini-reset" id="miniReset">reset: 3d04h</span>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+</div>
+
+<script>
+if (window.self !== window.top) document.body.classList.add('embed');
+
+const screen = document.getElementById('screen');
+const agentLink = document.getElementById('agentLink');
+const slash = agentLink.querySelector('.slash');
+const syncHeader = state => {
+  agentLink.classList.toggle('offline', state === 'pair');
+  slash.style.background = state === 'pair' ? 'var(--orange)' : 'transparent';
+  agentLink.setAttribute('aria-label', state === 'pair' ? 'Disconnected' : 'Connected');
+};
+
+// Animate ring + bar + number
+const _TARGET = 37, _TARGET_W = 62;
+const circumference = 188.5;
+function animateUsage() {
+  const start = performance.now(), dur = 900;
+  const _tick = ts => {
+    const t = Math.min((ts - start) / dur, 1);
+    const e = 1 - Math.pow(1 - t, 3);
+    const cv = Math.round(e * _TARGET);
+    const wv = Math.round(e * _TARGET_W);
+    // Ring arc
+    const arc = document.getElementById('ringArc');
+    if (arc) arc.style.strokeDashoffset = circumference * (1 - e * _TARGET / 100);
+    // Ring percentage
+    const pct = document.getElementById('ringPct');
+    if (pct) pct.textContent = cv + '%';
+    // Ring text value
+    const val = document.getElementById('ringVal');
+    if (val) val.textContent = cv + '% of 100k';
+    // Mini bar + pct
+    const bar = document.getElementById('miniBar');
+    if (bar) bar.style.width = e * _TARGET_W + '%';
+    const mp = document.getElementById('miniPct');
+    if (mp) mp.textContent = wv + '%';
+    if (t < 1) requestAnimationFrame(_tick);
+  };
+  requestAnimationFrame(_tick);
+}
+
+syncHeader(screen.dataset.state);
+animateUsage();
+</script>
+</body>
+</html>

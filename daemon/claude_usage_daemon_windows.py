@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Claude Usage Tracker Daemon — Windows (Phase 2).
+"""Clawdmeter usage daemon for native Windows.
 
-Reads the Claude OAuth token from the native-Windows credentials path and
-polls the Anthropic API for rate-limit utilization data. BLE glue added in
-later plans.
+Supports Claude usage via the Anthropic OAuth flow and Codex usage via the
+local Codex auth store plus OpenAI usage endpoints. Both providers emit the
+same BLE payload shape so the firmware can stay provider-agnostic.
 """
 
 import asyncio
+import base64
 import datetime
 import json
 import logging
@@ -19,11 +20,18 @@ import threading
 import time
 from pathlib import Path
 
+# Allow `python daemon\claude_usage_daemon_windows.py` from the repo root.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import httpx
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
-DEVICE_NAME = "Claude Controller"
+from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
+from daemon.payloads import build_claude_usage_payload, build_codex_usage_payload
+
+DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
@@ -38,6 +46,12 @@ ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning 
                            # N=2 would bust the 120s budget before reconnect even begins
 RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked retries inside 120s SLA
                            # ~5–10s band per CONTEXT.md Claude's Discretion; 8 chosen as middle ground
+CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_USAGE_URLS = (
+    "https://chatgpt.com/backend-api/wham/usage",
+    "https://chatgpt.com/backend-api/codex/usage",
+)
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -51,6 +65,7 @@ API_BODY = {
     "max_tokens": 1,
     "messages": [{"role": "user", "content": "hi"}],
 }
+BLE_ADDRESS_ENV = "CLAWDMETER_BLE_ADDRESS"
 
 
 def _build_file_logger() -> logging.Logger | None:
@@ -126,34 +141,317 @@ async def poll_api(token: str) -> dict | None:
         log(f"API HTTP {resp.status_code}: {resp.text[:200]}")
         return None
 
-    def hdr(name: str, default: str = "0") -> str:
-        return resp.headers.get(name, default)
-
     now = time.time()
+    return build_claude_usage_payload(resp.headers, now=now)
 
-    def reset_minutes(reset_ts: str) -> int:
+
+def _provider_preference() -> str:
+    return provider_preference()
+
+
+def _saved_ble_address_path() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return base / "Clawdmeter" / "ble-address.txt"
+
+
+def _is_probable_ble_address(addr: str) -> bool:
+    return bool(
+        re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", addr)
+        or re.fullmatch(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}", addr)
+    )
+
+
+def _ble_address_override() -> str | None:
+    raw = os.environ.get(BLE_ADDRESS_ENV, "").strip()
+    if not raw:
+        return None
+    if _is_probable_ble_address(raw):
+        return raw
+    log(f"Ignoring invalid {BLE_ADDRESS_ENV} value: {raw!r}")
+    return None
+
+
+def load_cached_address() -> str | None:
+    path = _saved_ble_address_path()
+    try:
+        addr = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if _is_probable_ble_address(addr):
+        return addr
+    log("Cached BLE address malformed, discarding")
+    clear_cached_address()
+    return None
+
+
+def save_cached_address(addr: str) -> bool:
+    if not _is_probable_ble_address(addr):
+        return False
+    path = _saved_ble_address_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(addr, encoding="utf-8")
+    except OSError as e:
+        log(f"Failed to save cached BLE address: {e}")
+        return False
+    return True
+
+
+def clear_cached_address() -> None:
+    _saved_ble_address_path().unlink(missing_ok=True)
+
+
+def _codex_auth_candidates() -> list[Path]:
+    if override := os.environ.get("CODEX_HOME"):
+        return [Path(override) / "auth.json"]
+
+    home = Path.home()
+    return [
+        home / ".Codex" / "auth.json",
+        home / ".codex" / "auth.json",
+    ]
+
+
+def _account_id_from_id_token(id_token: object) -> str | None:
+    if not isinstance(id_token, str):
+        return None
+    parts = id_token.split(".")
+    if len(parts) < 2:
+        return None
+
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload + padding)
+        claims = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(claims, dict):
+        return None
+    auth = claims.get("https://api.openai.com/auth")
+    if not isinstance(auth, dict):
+        return None
+    account_id = auth.get("chatgpt_account_id")
+    return account_id if isinstance(account_id, str) else None
+
+
+def _read_codex_credentials() -> dict | None:
+    for path in _codex_auth_candidates():
         try:
-            r = float(reset_ts)
-        except ValueError:
-            return 0
-        mins = (r - now) / 60.0
-        return int(round(mins)) if mins > 0 else 0
-
-    def pct(util: str) -> int:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
         try:
-            return int(round(float(util) * 100))
-        except ValueError:
-            return 0
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            log(f"Codex auth.json parse failed at {path}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            continue
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+        account_id = tokens.get("account_id") or _account_id_from_id_token(tokens.get("id_token"))
+        if isinstance(access_token, str) and access_token:
+            return {
+                "path": path,
+                "data": data,
+                "access_token": access_token,
+                "refresh_token": refresh_token if isinstance(refresh_token, str) else None,
+                "account_id": account_id if isinstance(account_id, str) else None,
+            }
+    return None
 
-    payload = {
-        "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
-        "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
-        "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
-        "ok": True,
+
+def _write_codex_credentials(creds: dict) -> bool:
+    path = creds.get("path")
+    data = creds.get("data")
+    if not isinstance(path, Path) or not isinstance(data, dict):
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as e:
+        log(f"Codex auth.json write failed: {e}")
+        return False
+    return True
+
+
+async def _refresh_codex_credentials(creds: dict) -> dict | None:
+    refresh_token = creds.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        log("Codex refresh token unavailable")
+        return None
+
+    body = {
+        "client_id": CODEX_REFRESH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
     }
-    return payload
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.post(
+                CODEX_REFRESH_TOKEN_URL,
+                headers={"Content-Type": "application/json"},
+                json=body,
+            )
+    except httpx.HTTPError as e:
+        log(f"Codex OAuth refresh failed: {e}")
+        return None
+    if resp.status_code >= 400:
+        log(f"Codex OAuth refresh HTTP {resp.status_code}")
+        return None
+
+    try:
+        refresh_data = resp.json()
+    except json.JSONDecodeError:
+        log("Codex OAuth refresh response was not JSON")
+        return None
+
+    access_token = refresh_data.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        log("Codex OAuth refresh response missing access token")
+        return None
+
+    new_refresh_token = refresh_data.get("refresh_token")
+    if not isinstance(new_refresh_token, str) or not new_refresh_token:
+        new_refresh_token = refresh_token
+
+    data = creds.get("data")
+    if not isinstance(data, dict):
+        return None
+    tokens = data.setdefault("tokens", {})
+    if not isinstance(tokens, dict):
+        return None
+
+    tokens["access_token"] = access_token
+    tokens["refresh_token"] = new_refresh_token
+    id_token = refresh_data.get("id_token")
+    if isinstance(id_token, str):
+        tokens["id_token"] = id_token
+    data["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    refreshed = {
+        **creds,
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "account_id": creds.get("account_id") or _account_id_from_id_token(id_token),
+        "data": data,
+    }
+    if not _write_codex_credentials(refreshed):
+        log("Codex OAuth refresh succeeded but auth.json could not be updated")
+    log("Codex OAuth refresh succeeded")
+    return refreshed
+
+
+def _usage_payload_from_codex_response(payload: object) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return build_codex_usage_payload(payload, now=time.time())
+    except ValueError:
+        return None
+
+
+async def poll_codex_api(creds: dict, *, retry_on_401: bool = True) -> dict | None:
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {creds['access_token']}",
+        "User-Agent": "codex-cli",
+    }
+    account_id = creds.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+
+    last_status = None
+    for url in CODEX_USAGE_URLS:
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                resp = await http.get(url, headers=headers)
+        except httpx.HTTPError as e:
+            log(f"Codex usage call failed: {e}")
+            return None
+
+        if resp.status_code == 404:
+            last_status = 404
+            continue
+        if resp.status_code == 401 and retry_on_401:
+            log("Codex usage HTTP 401; attempting OAuth refresh")
+            refreshed = await _refresh_codex_credentials(creds)
+            if refreshed is None:
+                return None
+            return await poll_codex_api(refreshed, retry_on_401=False)
+        if resp.status_code >= 400:
+            log(f"Codex usage HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError:
+            log("Codex usage response was not JSON")
+            return None
+        return _usage_payload_from_codex_response(payload)
+
+    if last_status == 404:
+        log("Codex usage endpoint unavailable")
+    return None
+
+
+def _select_named_usage_source(provider: str) -> tuple[str | None, object | None, str | None]:
+    if provider == "codex":
+        codex_creds = _read_codex_credentials()
+        if codex_creds is not None:
+            return "codex", codex_creds, None
+        return None, None, "Codex sign-in missing"
+
+    if provider == "claude":
+        token = read_token()
+        if token:
+            return "claude", token, None
+        return None, None, "token expired — run claude login"
+
+    return None, None, f"Provider unavailable: {provider}"
+
+
+def _select_usage_source(*, now: float | None = None) -> tuple[str | None, object | None, str | None]:
+    pref = _provider_preference()
+
+    if pref != PROVIDER_AUTO:
+        return _select_named_usage_source(pref)
+
+    for provider in auto_provider_ids():
+        source, data, _error = _select_named_usage_source(provider)
+        if source is not None:
+            return source, data, None
+    return None, None, "No usage source found"
+
+
+def _payload_for_wire(payload: dict) -> dict:
+    """Shrink modern payloads to the BLE-friendly flat form when aliases exist.
+
+    Windows WinRT writes to the ESP32's RX characteristic can reject larger JSON
+    payloads even though the semantic data is valid. The firmware still accepts
+    the compact flat shape, so prefer it on the wire when possible.
+    """
+    alias_keys = ("s", "sr", "w", "wr", "st", "ok")
+    if not all(key in payload for key in alias_keys):
+        return payload
+
+    wire = {
+        "s": payload["s"],
+        "sr": payload["sr"],
+        "w": payload["w"],
+        "wr": payload["wr"],
+        "st": payload["st"],
+        "ok": payload["ok"],
+    }
+    provider = payload.get("p")
+    if isinstance(provider, str) and provider:
+        wire["p"] = provider
+    return wire
 
 
 async def scan_for_device():
@@ -163,6 +461,21 @@ async def scan_for_device():
     if device:
         log(f"Found: {device.address}")
     return device  # BLEDevice or None — NOT an address string
+
+
+async def discover_target() -> tuple[object | None, str]:
+    """Pick the next connect target: env override, cached address, then active scan."""
+    override = _ble_address_override()
+    if override:
+        log(f"Using {BLE_ADDRESS_ENV} override: {override}")
+        return override, "override"
+
+    cached = load_cached_address()
+    if cached:
+        log(f"Trying cached device address: {cached}")
+        return cached, "cache"
+
+    return await scan_for_device(), "scan"
 
 
 class Session:
@@ -187,7 +500,8 @@ class Session:
             log(f"Refresh subscription unavailable: {e}")
 
     async def write_payload(self, payload: dict) -> bool:
-        data = json.dumps(payload, separators=(",", ":")).encode()
+        wire_payload = _payload_for_wire(payload)
+        data = json.dumps(wire_payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
             await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
@@ -324,7 +638,8 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
 
     Returns True if at least one successful write occurred.
     """
-    log(f"Connecting to {device.address}...")
+    display = device if isinstance(device, str) else device.address
+    log(f"Connecting to {display}...")
     # D-01: retry wrapper — defeats WinRT post-wake failure modes
     # (Could not get GATT services: Unreachable, stale is_connected).
     # Rebuild a fresh BleakClient each attempt (locked D-05 recipe).
@@ -379,19 +694,22 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                token = read_token()  # D-09: fresh each cycle
-                if not token:
-                    log("No token; skipping poll")
-                    if tray_state:
-                        tray_state.set_error("token expired — run claude login")
+                source, source_data, source_error = _select_usage_source(now=now)
+                if not source:
+                    log(f"{source_error}; skipping poll")
+                    if tray_state and source_error:
+                        tray_state.set_error(source_error)
                 else:
-                    try:
-                        payload = await poll_api(token)
-                    except AuthError:
-                        # Real 401/403 — token genuinely needs a refresh.
-                        if tray_state:
-                            tray_state.set_error("token expired — run claude login")
-                        payload = None
+                    if source == "codex":
+                        payload = await poll_codex_api(source_data)
+                    else:
+                        try:
+                            payload = await poll_api(source_data)
+                        except AuthError:
+                            # Real 401/403 — token genuinely needs a refresh.
+                            if tray_state:
+                                tray_state.set_error("token expired — run claude login")
+                            payload = None
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
@@ -472,15 +790,15 @@ async def main(tray_state=None) -> None:
                     # Not the main thread of the main interpreter — tray owns shutdown.
                     pass
 
-    log("=== Claude Usage Tracker Daemon (BLE, Windows) ===")
+    log("=== Clawdmeter Usage Daemon (BLE, Windows) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     # D-05: two distinct backoff regimes — slow-search (device absent) vs fast-reconnect (link dropped)
     search_backoff = 1     # caps at 60s — gentle, for a device that is genuinely absent/off
     reconnect_backoff = 1  # caps at RECONNECT_BACKOFF_CAP — fast, to clear the 120s SLA after a drop
     while not stop_event.is_set():
-        device = await scan_for_device()
-        if not device:
+        target, source = await discover_target()
+        if not target:
             # Slow-search regime: device was not found by scan — back off gently
             if tray_state:
                 tray_state.set_scanning()
@@ -492,7 +810,17 @@ async def main(tray_state=None) -> None:
             search_backoff = _next_backoff(search_backoff, 60)
             continue
 
-        ok = await connect_and_run(device, stop_event, tray_state)
+        ok = await connect_and_run(target, stop_event, tray_state)
+        connected_target = target
+
+        if not ok and source == "cache":
+            clear_cached_address()
+            log("Cached device address failed; falling back to active scan")
+            scanned = await scan_for_device()
+            if scanned is not None:
+                ok = await connect_and_run(scanned, stop_event, tray_state)
+                connected_target = scanned
+
         if not ok:
             # Fast-reconnect regime: had/attempted a link that dropped — retry quickly
             if tray_state:
@@ -504,6 +832,9 @@ async def main(tray_state=None) -> None:
                 pass
             reconnect_backoff = _next_backoff(reconnect_backoff, RECONNECT_BACKOFF_CAP)
         else:
+            if source != "override":
+                addr = connected_target if isinstance(connected_target, str) else connected_target.address
+                save_cached_address(addr)
             # Successful session — reset reconnect counter to floor; search_backoff also reset
             reconnect_backoff = 1
             search_backoff = 1

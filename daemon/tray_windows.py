@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 import time
+from functools import partial
 
 # Repo root = the directory that CONTAINS the `daemon` package (this file is
 # <repo>/daemon/tray_windows.py). Resolve it from __file__ so the package
@@ -180,6 +181,7 @@ def main() -> None:
     from pystray import Menu, MenuItem
 
     import daemon.autostart_windows as autostart
+    from daemon.config import provider_choices, provider_preference, set_provider
     from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
@@ -208,21 +210,9 @@ def main() -> None:
     daemon_thread.start()
 
     # --- menu ---
-    def _on_quit(icon_ref, _item) -> None:
-        # NEVER call ts.stop_event.set() directly from the tray thread;
-        # asyncio.Event is NOT thread-safe (RESEARCH Pitfall 2).
-        #
-        # After signalling, WAIT for the daemon thread to finish its graceful
-        # shutdown (the loop's finally: client.disconnect()) BEFORE we stop the
-        # icon and let the process exit. Without this join the daemon=True thread
-        # is killed mid-flight, the peer never gets a clean GATT disconnect, and
-        # the device sits frozen on stale data instead of returning to its waiting
-        # screen (SC#3 field report). The timeout caps the block so Quit can never
-        # hang if a WinRT disconnect wedges (rare) — we exit anyway as a fallback.
-        if ts.loop is not None and ts.stop_event is not None:
-            ts.loop.call_soon_threadsafe(ts.stop_event.set)
-            daemon_thread.join(timeout=6.0)
-        icon_ref.stop()
+    def _on_quit(_icon_ref, _item) -> None:
+        """Kill process immediately — graceful GATT disconnect unreliable in practice."""
+        os._exit(1)
 
     def _on_toggle(_icon_ref, _item) -> None:
         if autostart.is_enabled():
@@ -234,9 +224,27 @@ def main() -> None:
             autostart.enable(tray_script=os.path.abspath(__file__))
         icon.update_menu()
 
+    def _on_provider(provider_id: str) -> None:
+        if set_provider(provider_id):
+            daemon_log(f"Provider preference set: {provider_id}")
+        else:
+            ts.set_error("could not save provider preference")
+        icon.update_menu()
+
+    def _on_provider_click(provider_id: str, _icon_ref, _item) -> None:
+        _on_provider(provider_id)
+
+    def _provider_item(provider):
+        return MenuItem(
+            provider.label,
+            partial(_on_provider_click, provider.id),
+            checked=lambda _item, provider_id=provider.id: provider_preference() == provider_id,
+        )
+
     icon.menu = Menu(
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
+        MenuItem("Provider", Menu(*(_provider_item(provider) for provider in provider_choices()))),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
         MenuItem("Quit", _on_quit),

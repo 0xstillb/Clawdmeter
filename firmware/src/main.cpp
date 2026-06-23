@@ -1,10 +1,10 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <lvgl.h>
-#include <ArduinoJson.h>
 #include <esp_heap_caps.h>
 
 #include "data.h"
+#include "usage_payload.h"
 #include "ui.h"
 #include "ble.h"
 #include "splash.h"
@@ -21,6 +21,25 @@
 #include "hal/imu_hal.h"
 
 static UsageData usage = {};
+
+static bool     touch_down = false;
+static bool     touch_released = false;
+static uint32_t touch_down_ms = 0;
+static uint32_t touch_release_held_ms = 0;
+
+static void note_touch_sample(bool pressed) {
+    const uint32_t now = millis();
+    if (pressed && !touch_down) {
+        touch_down = true;
+        touch_released = false;
+        touch_down_ms = now;
+        touch_release_held_ms = 0;
+    } else if (!pressed && touch_down) {
+        touch_down = false;
+        touch_released = true;
+        touch_release_held_ms = now - touch_down_ms;
+    }
+}
 
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
@@ -57,6 +76,8 @@ static void rounder_cb(lv_event_t* e) {
 //   false → touch never counts as activity and is fully swallowed while the
 //           panel is dark, so pets/sleeves can't wake it overnight and LVGL
 //           can't quietly toggle splash<->usage on a black panel.
+// Wake-touch release flag (set by my_touch_cb when idle wake completes)
+static bool wake_touch_release_seen = false;
 static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t x, y;
     bool pressed;
@@ -77,6 +98,7 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
             if (touch_wake_swallowed) {
                 touch_wake_swallowed = false;
                 pressed = false;
+                wake_touch_release_seen = true;
             }
         } else if (raw_pressed && touch_wake_swallowed) {
             // Held finger through wake — keep hiding until release.
@@ -87,6 +109,8 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         pressed = false;
     }
 
+    note_touch_sample(pressed);
+
     if (pressed) {
         data->point.x = x;
         data->point.y = y;
@@ -94,25 +118,6 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }
-}
-
-// Parse a JSON line into UsageData.
-static bool parse_json(const char* json, UsageData* out) {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, json);
-    if (err) {
-        Serial.printf("JSON parse error: %s\n", err.c_str());
-        return false;
-    }
-
-    out->session_pct = doc["s"] | 0.0f;
-    out->session_reset_mins = doc["sr"] | -1;
-    out->weekly_pct = doc["w"] | 0.0f;
-    out->weekly_reset_mins = doc["wr"] | -1;
-    strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
-    out->ok = doc["ok"] | false;
-    out->valid = true;
-    return true;
 }
 
 // ---- Serial command buffer ----
@@ -274,6 +279,127 @@ static void pair_tick(void) {
     }
 }
 
+
+
+
+// Touch hold UX state
+static bool     touch_hold_active = false;
+static uint32_t touch_hold_hint_clear = 0;
+static constexpr uint32_t SPLASH_TAP_MAX_MS = 800;
+static constexpr uint32_t SPLASH_PAIR_MS = 3000;
+// Replaces splash_touch_tick() — handles all touch UX navigation:
+//   Splash -> tap -> Usage (force view=2 if BLE connected)
+//   Usage -> tap -> Splash  (via global_click_cb in ui.cpp)
+//   Idle -> tap -> Usage (if BLE connected) else Splash
+//   Idle (asleep) -> wake-tap -> Usage (if BLE connected) else Splash
+//   Splash/Pairing -> hold 3s + release -> ble_clear_bonds()
+static void touch_ux_tick(void) {
+    const screen_t screen = ui_get_current_screen();
+    const uint32_t now = millis();
+    static uint32_t last_nav_ms = 0;
+
+    // ---- 0. Navigation cooldown — ignore stale touch events within 400ms
+    //         of the last UI navigation (prevents ghost-touch toggling from
+    //         XPT2046 noise or carry-over events after screen switch)
+    if (touch_released && now - last_nav_ms < 400) {
+        touch_released = false;
+    }
+    if (wake_touch_release_seen && now - last_nav_ms < 400) {
+        wake_touch_release_seen = false;
+    }
+
+    // Track last navigation time (macro to set at each navigation point)
+    #define NAV_COOLDOWN() do { last_nav_ms = now; } while(0)
+
+    // ---- 1. Hold progress (visual update while finger held down) ----
+    if (touch_down && !wake_touch_release_seen) {
+        const uint32_t held = now - touch_down_ms;
+        if (held >= 500 && held < SPLASH_PAIR_MS &&
+            (screen == SCREEN_SPLASH || (screen == SCREEN_USAGE && ui_get_view_state() == 0))) {
+            touch_hold_active = true;
+            char buf[32];
+            int remaining = 3 - (int)(held / 1000);
+            if (remaining < 1) remaining = 1;
+            snprintf(buf, sizeof(buf), "Hold %ds to pair...", remaining);
+            if (screen == SCREEN_SPLASH) splash_set_hint(buf);
+        } else if (held >= SPLASH_PAIR_MS && touch_hold_active) {
+            if (screen == SCREEN_SPLASH) splash_set_hint("Release to pair !");
+        }
+    }
+
+    // ---- 2. Touch release ----
+    if (touch_released) {
+        const bool on_splash_or_pairing =
+            screen == SCREEN_SPLASH ||
+            (screen == SCREEN_USAGE && ui_get_view_state() == 0);
+
+        if (touch_release_held_ms >= SPLASH_PAIR_MS && on_splash_or_pairing) {
+            // Held >= 3s -> clear bonds
+            Serial.println("Touch UX: 3s hold -> clearing bonds");
+            ble_clear_bonds();
+            touch_hold_active = false;
+            if (screen == SCREEN_SPLASH) {
+                splash_set_hint("Bonds cleared !");
+                touch_hold_hint_clear = now + 2000;
+            }
+        } else if (touch_release_held_ms <= SPLASH_TAP_MAX_MS) {
+            // Tap navigation
+            touch_hold_active = false;
+            if (screen == SCREEN_SPLASH) {
+                // Only navigate if this touch started while already on Splash,
+                // not carried over from a tap on Usage/Pairing that already
+                // toggled screen via global_click_cb (stale release guard)
+                if (touch_down_ms > ui_get_last_screen_change_time()) {
+                    ui_show_screen(SCREEN_USAGE);
+                    NAV_COOLDOWN();
+                    if (ui_is_ble_connected()) {
+                        ui_force_view(2);
+                    }
+                }
+            } else if (screen == SCREEN_USAGE && ui_get_view_state() == 1) {
+                // On idle (view=1) — tap -> Usage if BLE connected, else Splash
+                // LVGL click events don't bubble from idle_canvas children to
+                // usage_container, so global_click_cb won't fire for taps on
+                // the creature. Handle via raw touch state instead.
+                if (touch_down_ms > ui_get_last_screen_change_time()) {
+                    if (ui_is_ble_connected()) {
+                        ui_force_view(2);
+                    } else {
+                        ui_show_screen(SCREEN_SPLASH);
+                    }
+                    NAV_COOLDOWN();
+                }
+            }
+            // Usage/Pairing -> Splash handled by global_click_cb in LVGL
+        } else if (touch_release_held_ms > SPLASH_TAP_MAX_MS && touch_release_held_ms < SPLASH_PAIR_MS) {
+            // Released in between mid-range -> cancel hold
+            touch_hold_active = false;
+            if (screen == SCREEN_SPLASH) splash_set_hint("tap to enter  /  hold 3s to pair");
+        }
+
+        touch_released = false;
+    }
+
+    // ---- 3. Idle wake-touch release (touch swallowed by my_touch_cb) ----
+    if (wake_touch_release_seen) {
+        wake_touch_release_seen = false;
+        touch_hold_active = false;
+        if (screen == SCREEN_USAGE) {
+            if (ui_is_ble_connected()) {
+                ui_force_view(2);
+            } else {
+                ui_show_screen(SCREEN_SPLASH);
+            }
+            NAV_COOLDOWN();
+        }
+    }
+
+    // ---- 4. Hint reset after "Bonds cleared" ----
+    if (touch_hold_hint_clear && now >= touch_hold_hint_clear) {
+        touch_hold_hint_clear = 0;
+        if (screen == SCREEN_SPLASH) splash_set_hint("tap to enter  /  hold 3s to pair");
+    }
+}
 void loop() {
     idle_tick();
     lv_timer_handler();
@@ -282,6 +408,7 @@ void loop() {
     power_hal_tick();
     imu_hal_tick();
     splash_tick();
+    touch_ux_tick();
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
     // is detected by the next tick after wake and ramped in then.
@@ -290,8 +417,9 @@ void loop() {
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
     //   SECONDARY → HID Shift+Tab  (mode toggle; only if the board has one)
-    //   PWR       → on splash: cycle animations; on usage: cycle brightness;
-    //               hold ~3s + release: pairing mode
+    //   Touch     → on splash: tap enters dashboard, hold ~3s + release
+    //               clears BLE bonds for pairing.
+    //   BOOT/PWR  → fallback physical controls on boards that expose them.
     // First press from sleep is consumed as a wake-only event by
     // idle_consume_wake_press(); the normal action fires from the second
     // press. Activity bookkeeping happens inside idle_consume_wake_press
@@ -358,13 +486,17 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        if (usage_parse_json(ble_get_data(), &usage)) {
             int g_before = usage_rate_group();
-            usage_rate_sample(usage.session_pct);
+            float rate_pct = usage.top.pct;
+            if (usage.provider == USAGE_PROVIDER_CODEX) {
+                rate_pct = 100.0f - rate_pct;
+            }
+            usage_rate_sample(rate_pct);
             int g_after = usage_rate_group();
             if (g_after != g_before) {
                 Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
+                    g_before, g_after, usage.top.pct);
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);

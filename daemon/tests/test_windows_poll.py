@@ -70,13 +70,29 @@ def test_poll_api_nominal(monkeypatch):
         payload = _run(poll_api("fake-token"))
 
     assert payload is not None
-    assert payload["s"] == 42
-    assert payload["w"] == 10
+    assert payload["p"] == "claude"
+    assert payload["mode"] == "window"
     assert payload["st"] == "allowed"
     assert payload["ok"] is True
+
+    assert payload["top"]["label"] == "Current"
+    assert payload["top"]["kind"] == "window_short"
+    assert payload["top"]["pct"] == 42
+    assert payload["top"]["has_reset"] is True
+
+    assert payload["bottom"]["label"] == "Weekly"
+    assert payload["bottom"]["kind"] == "window_long"
+    assert payload["bottom"]["pct"] == 10
+    assert payload["bottom"]["has_reset"] is True
+
+    # Legacy aliases stay present for old firmware during rollout.
+    assert payload["s"] == 42
+    assert payload["w"] == 10
     # reset_minutes allows ±1 minute tolerance
     assert abs(payload["sr"] - 60) <= 1, f"Expected ~60, got {payload['sr']}"
     assert abs(payload["wr"] - 1440) <= 1, f"Expected ~1440, got {payload['wr']}"
+    assert abs(payload["top"]["reset_mins"] - 60) <= 1, f"Expected ~60, got {payload['top']['reset_mins']}"
+    assert abs(payload["bottom"]["reset_mins"] - 1440) <= 1, f"Expected ~1440, got {payload['bottom']['reset_mins']}"
 
 
 # ---------------------------------------------------------------------------

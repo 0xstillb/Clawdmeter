@@ -21,9 +21,9 @@ from PIL import Image, ImageDraw
 W: int = 80
 H: int = 80
 
-# Brand hex derived from the dominant opaque RGB565 color in logo.h (D-03).
-# 0xDBAA -> RGB888 (222, 117, 82) -> #DE7552
-BRAND_HEX: str = "#DE7552"
+# Brand hex derived from the dominant opaque RGB565 color in logo.h — Hermes Agent portrait.
+# #ECE6DB is the main cream color; #DEDAD0 is accent detail.
+BRAND_HEX: str = "#ECE6DB"
 
 # Locked corner-bubble RGBA colors (from RESEARCH, verified end-to-end).
 BUBBLE: dict[str, tuple[int, int, int, int]] = {

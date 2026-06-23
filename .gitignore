@@ -18,3 +18,7 @@ daemon/.venv/
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Hermes Agent / codex temp files
+.codex-tmp/
+.hermes/

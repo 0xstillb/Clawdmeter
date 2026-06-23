@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Usage Variant F — 2-Card Hermes</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0f1013;
+  --shell: #1a1c20;
+  --screen: #14161a;
+  --panel: rgba(24,27,33,.96);
+  --panel2: rgba(19,22,27,.96);
+  --edge: rgba(255,255,255,.07);
+  --text: #ece6db;
+  --muted: #a7a293;
+  --blue: #4a6df7;
+  --blue-soft: rgba(74,109,247,.12);
+  --yellow: #ffd53d;
+  --yellow-soft: rgba(255,213,61,.10);
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+}
+body.embed { padding: 0; background: #101216; }
+.frame {
+  background: var(--shell);
+  border-radius: 34px;
+  padding: 14px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 20px 40px rgba(0,0,0,.58);
+}
+.device {
+  width: 240px;
+  height: 320px;
+  border-radius: 22px;
+  overflow: hidden;
+  position: relative;
+}
+.screen {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at top, rgba(74,109,247,.08) 0%, transparent 28%),
+    linear-gradient(rgba(255,255,255,.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.022) 1px, transparent 1px),
+    var(--screen);
+  background-size: auto, 14px 14px, 14px 14px, auto;
+  padding: 10px 12px 8px;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  height: 68px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.header-left, .header-right {
+  width: 72px;
+  display: flex;
+  align-items: center;
+}
+.header-right { justify-content: flex-end; }
+.title {
+  flex: 1;
+  text-align: left;
+  padding-left: 8px;
+  font-size: 22px;
+  line-height: 1.1;
+  letter-spacing: -.035em;
+  font-weight: 800;
+}
+.brand-chip {
+  width: 60px;
+  height: 60px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#headerCanvas { width: 60px; height: 60px; image-rendering: pixelated; }
+.agent-link {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: rgba(74,109,247,.12);
+  border: 1px solid rgba(74,109,247,.24);
+  box-shadow: inset 0 0 0 1px rgba(74,109,247,.06);
+}
+.agent-link .slash {
+  position: absolute;
+  inset: 5px;
+  border-radius: 999px;
+  background: var(--blue);
+}
+
+/* Data-flow strip */
+.data-flow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  margin-bottom: 6px;
+}
+.data-flow .track {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.05);
+  background: rgba(255,255,255,.035);
+}
+.data-flow .fill {
+  width: 62%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(74,109,247,.95), transparent);
+  background-size: 200% 100%;
+  animation: stream 1.4s ease-in-out infinite;
+}
+.data-flow .pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px rgba(74,109,247,.14);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes stream {
+  0%,100% { transform: translateX(-30%); opacity: .35; }
+  50% { transform: translateX(30%); opacity: 1; }
+}
+@keyframes pulse {
+  0%,100% { opacity: .55; transform: scale(.95); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+/* Card stack */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+/* Card base */
+.card {
+  border-radius: 16px;
+  padding: 10px 10px 9px;
+  display: grid;
+  gap: 6px;
+  position: relative;
+  overflow: hidden;
+}
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,.03), transparent 40%);
+  pointer-events: none;
+}
+
+/* Primary (Current) card */
+.card.primary {
+  flex: 1;
+  min-height: 88px;
+  background: linear-gradient(180deg, rgba(29,36,58,.98), rgba(20,25,38,.98));
+  border: 1px solid rgba(74,109,247,.20);
+  box-shadow: inset 0 0 0 1px rgba(74,109,247,.06), 0 0 22px rgba(74,109,247,.08);
+}
+.card.primary::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 7px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(74,109,247,.65), transparent);
+  box-shadow: 0 0 10px rgba(74,109,247,.28);
+  opacity: .7;
+  pointer-events: none;
+}
+
+/* Weekly card */
+.card.weekly {
+  flex: 1;
+  min-height: 88px;
+  background: linear-gradient(180deg, rgba(39,35,20,.97), rgba(27,24,15,.96));
+  border: 1px solid rgba(255,213,61,.16);
+  box-shadow: inset 0 0 0 1px rgba(255,213,61,.05), 0 0 18px rgba(255,213,61,.06);
+}
+.card.weekly::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 7px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,213,61,.7), transparent);
+  box-shadow: 0 0 10px rgba(255,213,61,.24);
+  opacity: .7;
+  pointer-events: none;
+}
+
+/* Card top row */
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  position: relative;
+  z-index: 1;
+}
+.card-label {
+  font-size: 9px;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  font-weight: 700;
+}
+.card-tag {
+  font-size: 8px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.06);
+  background: rgba(255,255,255,.05);
+  color: var(--text);
+}
+.card.primary .card-tag {
+  color: var(--blue);
+  border-color: rgba(74,109,247,.18);
+  background: rgba(74,109,247,.10);
+}
+.card.weekly .card-tag {
+  color: var(--yellow);
+  border-color: rgba(255,213,61,.18);
+  background: rgba(255,213,61,.10);
+}
+
+/* Card value (big %) */
+.card-value {
+  font-size: 36px;
+  line-height: .9;
+  font-weight: 800;
+  letter-spacing: -.05em;
+  position: relative;
+  z-index: 1;
+}
+
+/* Card meta row */
+.card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 8px;
+  color: var(--muted);
+  position: relative;
+  z-index: 1;
+}
+.card-meta .left {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Meta dot */
+.meta-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--blue);
+  box-shadow: 0 0 0 2px rgba(74,109,247,.14);
+}
+.meta-dot.yellow {
+  background: var(--yellow);
+  box-shadow: 0 0 0 2px rgba(255,213,61,.14);
+}
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="device">
+    <div class="screen" data-state="usage">
+      <!-- Header -->
+      <div class="header">
+        <div class="header-left"><div class="brand-chip"><canvas id="headerCanvas" width="60" height="60"></canvas></div></div>
+        <div class="title">Usage</div>
+        <div class="header-right"><div class="agent-link" aria-label="Agent connected"><span class="slash"></span></div></div>
+      </div>
+
+      <!-- Content -->
+      <div class="data-flow" aria-hidden="true">
+        <div class="track"><div class="fill"></div></div>
+        <div class="pulse"></div>
+      </div>
+
+      <div class="stack">
+        <!-- Current card -->
+        <div class="card primary">
+          <div class="card-top">
+            <div class="card-label">Current</div>
+            <div class="card-tag">5h</div>
+          </div>
+          <div class="card-value" id="cardCurrent">0%</div>
+          <div class="card-meta"><span class="left"><span class="meta-dot"></span>resets</span><span>02h14m</span></div>
+        </div>
+
+        <!-- Weekly card -->
+        <div class="card weekly">
+          <div class="card-top">
+            <div class="card-label">Weekly</div>
+            <div class="card-tag">7d</div>
+          </div>
+          <div class="card-value" id="cardWeekly">0%</div>
+          <div class="card-meta"><span class="left"><span class="meta-dot yellow"></span>resets</span><span>3d04h</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Embed mode
+if (window.self !== window.top) document.body.classList.add('embed');
+
+// Hermes pixel-art header
+const _PX={hermes:{f:"000000000111000000000000011110011100000000011111110011100000000111110000110100000100001201120111000001111111111111111000011111011110110110000111011111111111100001100001001101111000000100000011111111000000000000111111110000000000001111111100000100000111111111000001000001101111101010111001011011111011111111110111111110101001111110111111111100101111010111111100001101110101000011000000111000000000000000000000011100000000000001111001110000000001111111001110000000011111000011010000010000120112011100000111111111111111100001111101111011011000011101111111111110000110000100110111100000010000001111111100000000000011111111000000000000111111110000010000011111111100000100000110111110101011100101101111101111111111011111111010100111111011111111110010111101011111110000110111010100001100000011100000000000000000000001110000000000000111100111000000000111111100111000000001111100001101000001000012011201110000011111111111111110000111110111101101100001110111111111111000011000010011011110000001000000111111110000000000001111111100000000000011111111000001000001111111110000010000011011111010101110010110111110111111111101111111101010011111101111111111001011110101111111000011011101010000110000001110000000000000",h:600,c:3},p:["#14161a","#ece6db","#dedad0"],w:20,h:20};
+const _hC=document.getElementById('headerCanvas'),_hX=_hC?_hC.getContext('2d'):null;
+let _hF=null;
+function _startHAnim(){
+  if(_hF)cancelAnimationFrame(_hF);
+  if(!_hX)return;
+  let idx=0,last=0,dot=0;
+  _hX.imageSmoothingEnabled=false;
+  const tick=ts=>{
+    if(ts-last<180){_hF=requestAnimationFrame(tick);return;}
+    last=ts;
+    _hX.clearRect(0,0,60,60);
+    const off=(idx%3)*400,src=_PX.hermes.f;
+    for(let y=0;y<20;y++)for(let x=0;x<20;x++){
+      const v=parseInt(src[off+y*20+x]);
+      if(!v)continue;
+      _hX.fillStyle=_PX.p[v];
+      _hX.fillRect(x*3,y*3,3,3);
+    }
+    dot=(dot+1)%60;
+    for(let i=0;i<3;i++){
+      const ph=(dot+i*20)%60,dy=Math.floor(ph/60*14),a=ph<40?1-ph/40:0;
+      if(a>0){_hX.fillStyle='rgba(74,109,247,'+(a*.85)+')';_hX.beginPath();_hX.arc(46+i*4,10+dy,2,0,Math.PI*2);_hX.fill();}
+    }
+    idx++; _hF=requestAnimationFrame(tick);
+  };
+  _hF=requestAnimationFrame(tick);
+}
+
+// Usage animation
+function _animateUsage(){
+  const tC=37,tW=62;
+  const eC=document.getElementById('cardCurrent'),eW=document.getElementById('cardWeekly');
+  const start=performance.now(),dur=820;
+  const tick=ts=>{
+    const t=Math.min((ts-start)/dur,1);
+    const e=1-Math.pow(1-t,3);
+    const cv=Math.round(e*tC),wv=Math.round(e*tW);
+    eC.textContent=cv+'%'; eW.textContent=wv+'%';
+    if(t<1)requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+_startHAnim();
+_animateUsage();
+</script>
+</body>
+</html>

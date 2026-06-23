@@ -18,74 +18,106 @@ static int  canvas_h  = GRID * 24;
 // Background fallback when palette is missing
 #define COL_EMPTY    0x0000  // true black (matches THEME_BG)
 
-LV_FONT_DECLARE(font_styrene_28);
-
 static lv_obj_t *splash_container = NULL;
 static lv_obj_t *canvas = NULL;
-static lv_obj_t *label_status = NULL;     // shown only when no animations loaded
-static uint16_t *canvas_buf = NULL;        // 480x480 RGB565 (PSRAM)
+static uint16_t *canvas_buf = NULL;        // square RGB565 canvas, PSRAM when available
 
 static uint16_t cur_anim = 0;
-static uint16_t cur_frame = 0;
 static uint32_t frame_started_ms = 0;
 static uint32_t last_pick_ms = 0;
 static bool active = false;
+static uint8_t splash_phase = 0;
 
 // While splash is showing, auto-cycle to the next animation in the current
 // rate-driven group every this many ms.
 #define SPLASH_ROTATE_INTERVAL_MS 20000
 
-// Usage-rate animation groups: 4 groups × up to 4 animations each.
-// Filled at init by matching literal names from splash_anims[].
-#define GROUP_COUNT 4
-#define GROUP_MAX   4
-static int8_t  group_lists[GROUP_COUNT][GROUP_MAX];
-static uint8_t group_size[GROUP_COUNT] = {0};
-static uint8_t group_rotation[GROUP_COUNT] = {0};
+static const char HERMES_SPLASH_FRAME[] =
+    "00000000011100000000"
+    "00000111100111000000"
+    "00011111110011100000"
+    "00011111000011010000"
+    "01000012011201110000"
+    "01111111111111111000"
+    "01111101111011011000"
+    "01110111111111111000"
+    "01100001001101111000"
+    "00010000001111111100"
+    "00000000001111111100"
+    "00000000001111111100"
+    "00010000011111111100"
+    "00010000011011111010"
+    "10111001011011111011"
+    "11111111011111111010"
+    "10011111101111111111"
+    "00101111010111111100"
+    "00110111010100001100"
+    "00001110000000000000";
 
-static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
-    // Group 0 — idle / sleepy
-    { "expression sleep", "idle breathe", "idle blink", "expression wink" },
-    // Group 1 — normal pace
-    { "idle look around", "work think", "work coding", NULL },
-    // Group 2 — active
-    { "dance sway", "expression surprise", "dance bounce", NULL },
-    // Group 3 — heavy
-    { "dance bounce dj", "dance sway dj", "dance djmix", NULL },
-};
+static uint16_t rgb565(uint32_t hex) {
+    uint8_t r = (uint8_t)((hex >> 16) & 0xff);
+    uint8_t g = (uint8_t)((hex >> 8) & 0xff);
+    uint8_t b = (uint8_t)(hex & 0xff);
+    return (uint16_t)(((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3));
+}
 
-static void resolve_group_lists(void) {
-    for (int g = 0; g < GROUP_COUNT; g++) {
-        group_size[g] = 0;
-        for (int s = 0; s < GROUP_MAX; s++) {
-            group_lists[g][s] = -1;
-            const char* want = GROUP_NAMES[g][s];
-            if (!want) continue;
-            for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-                if (strcmp(splash_anims[i].name, want) == 0) {
-                    group_lists[g][group_size[g]++] = (int8_t)i;
-                    break;
-                }
-            }
+static void put_square(int x, int y, int size, uint16_t color) {
+    if (!canvas_buf) return;
+    for (int yy = 0; yy < size; ++yy) {
+        int py = y + yy;
+        if (py < 0 || py >= canvas_h) continue;
+        for (int xx = 0; xx < size; ++xx) {
+            int px = x + xx;
+            if (px < 0 || px >= canvas_w) continue;
+            canvas_buf[py * canvas_w + px] = color;
         }
     }
 }
 
-static uint16_t *row_buf = NULL;   // scratch row, sized to canvas_w
+static void render_hermes_splash(void) {
+    if (!canvas_buf) return;
+    const uint16_t bg = rgb565(0x050608);
+    const uint16_t grid = rgb565(0x080b12);
+    const uint16_t body = rgb565(0xece6db);
+    const uint16_t shade = rgb565(0xdedad0);
+    const uint16_t blue = rgb565(0x5a7aff);
+    const uint16_t yellow = rgb565(0xffd53d);
 
-static void render_frame(const uint8_t *cells, const uint16_t *palette) {
-    if (!row_buf || !canvas_buf) return;
-    for (int gy = 0; gy < GRID; gy++) {
-        for (int gx = 0; gx < GRID; gx++) {
-            uint8_t code = cells[gy * GRID + gx];
-            uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
-            uint16_t *p = &row_buf[gx * cell];
-            for (int i = 0; i < cell; i++) p[i] = color;
-        }
-        for (int dy = 0; dy < cell; dy++) {
-            memcpy(&canvas_buf[(gy * cell + dy) * canvas_w], row_buf, canvas_w * 2);
+    for (int i = 0; i < canvas_w * canvas_h; ++i) canvas_buf[i] = bg;
+
+    for (int y = 0; y < canvas_h; y += 14) {
+        for (int x = 0; x < canvas_w; ++x) canvas_buf[y * canvas_w + x] = grid;
+    }
+    for (int x = 0; x < canvas_w; x += 14) {
+        for (int y = 0; y < canvas_h; ++y) canvas_buf[y * canvas_w + x] = grid;
+    }
+
+    const int px = (canvas_w >= 180) ? 7 : 6;
+    const int art_w = 20 * px;
+    const int ox = (canvas_w - art_w) / 2;
+    const int oy = (canvas_h - art_w) / 2 + ((splash_phase % 24) < 12 ? 0 : 1);
+    for (int y = 0; y < 20; ++y) {
+        for (int x = 0; x < 20; ++x) {
+            char code = HERMES_SPLASH_FRAME[y * 20 + x];
+            if (code == '0') continue;
+            put_square(ox + x * px, oy + y * px, px, code == '2' ? shade : body);
         }
     }
+
+    if ((cur_anim & 1) == 0) {
+        const int t = splash_phase % 48;
+        for (int i = 0; i < 4; ++i) {
+            const int ph = (t + i * 12) % 48;
+            put_square(ox + art_w - 12 + i * 5, oy + 12 + ph / 2, ph < 28 ? 3 : 2, yellow);
+        }
+    } else {
+        const int orbit[8][2] = {{70, 6}, {110, 20}, {134, 68}, {112, 118}, {68, 134}, {24, 112}, {8, 68}, {24, 22}};
+        const int a = (splash_phase / 6) % 8;
+        const int b = (a + 4) % 8;
+        put_square((canvas_w - 140) / 2 + orbit[a][0], (canvas_h - 140) / 2 + orbit[a][1], 5, blue);
+        put_square((canvas_w - 140) / 2 + orbit[b][0], (canvas_h - 140) / 2 + orbit[b][1], 3, blue);
+    }
+
     if (canvas) lv_obj_invalidate(canvas);
 }
 
@@ -149,20 +181,12 @@ void splash_mini_tick(void) {
     mini_render();
 }
 
-static void show_placeholder() {
-    // Solid dark background + centered status label.
-    if (canvas_buf) {
-        for (int i = 0; i < canvas_w * canvas_h; i++) canvas_buf[i] = COL_EMPTY;
-    }
-    if (canvas) lv_obj_invalidate(canvas);
-    if (label_status) lv_obj_clear_flag(label_status, LV_OBJ_FLAG_HIDDEN);
-}
-
 void splash_init(lv_obj_t *parent) {
     const BoardCaps& c = board_caps();
     int min_dim = (c.width < c.height) ? c.width : c.height;
     cell     = min_dim / GRID;       // fits within the smaller display dimension
     if (cell < 4) cell = 4;
+    if (c.width > c.height && c.height <= 260) cell = 7;
 
 #ifdef BOARD_HAS_PSRAM
     const uint32_t canvas_caps = MALLOC_CAP_SPIRAM;
@@ -181,8 +205,7 @@ void splash_init(lv_obj_t *parent) {
     canvas_h = GRID * cell;
 
     canvas_buf = (uint16_t*)heap_caps_malloc(canvas_w * canvas_h * 2, canvas_caps);
-    row_buf    = (uint16_t*)heap_caps_malloc(canvas_w * 2,             canvas_caps);
-    if (!canvas_buf || !row_buf) {
+    if (!canvas_buf) {
         Serial.println("splash: failed to alloc canvas buffer");
         return;
     }
@@ -190,7 +213,7 @@ void splash_init(lv_obj_t *parent) {
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, c.width, c.height);
     lv_obj_set_pos(splash_container, 0, 0);
-    lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
+    lv_obj_set_style_bg_color(splash_container, lv_color_hex(0x050608), 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(splash_container, 0, 0);
     lv_obj_set_style_pad_all(splash_container, 0, 0);
@@ -198,80 +221,45 @@ void splash_init(lv_obj_t *parent) {
 
     canvas = lv_canvas_create(splash_container);
     lv_canvas_set_buffer(canvas, canvas_buf, canvas_w, canvas_h, LV_COLOR_FORMAT_RGB565);
-    lv_obj_center(canvas);
+    lv_obj_align(canvas, LV_ALIGN_CENTER, 0, 0);
 
-    // Placeholder label (visible only when no animations are loaded)
-    label_status = lv_label_create(splash_container);
-    lv_label_set_text(label_status,
-        "no animations loaded\n\n"
-        "run tools/scrape_claudepix.js\n"
-        "then tools/convert_to_c.js");
-    lv_obj_set_style_text_font(label_status, &font_styrene_28, 0);
-    lv_obj_set_style_text_color(label_status, lv_color_hex(0xb0aea5), 0);
-    lv_obj_set_style_text_align(label_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(label_status);
-
-    resolve_group_lists();
-
-    if (SPLASH_ANIM_COUNT == 0) {
-        show_placeholder();
-    } else {
-        lv_obj_add_flag(label_status, LV_OBJ_FLAG_HIDDEN);
-        const splash_anim_def_t *a = &splash_anims[0];
-        render_frame(a->frames[0], a->palette);
-        frame_started_ms = millis();
-    }
+    render_hermes_splash();
+    frame_started_ms = millis();
 
     lv_obj_add_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
 }
 
 void splash_tick(void) {
-    if (!active || SPLASH_ANIM_COUNT == 0) return;
+    if (!active) return;
 
     // Auto-rotate to the next animation in the current group.
     if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
         splash_pick_for_current_rate();
     }
 
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    if (a->frame_count == 0) return;
-
-    uint16_t hold = a->holds[cur_frame];
-    if (millis() - frame_started_ms >= hold) {
-        cur_frame = (cur_frame + 1) % a->frame_count;
+    if (millis() - frame_started_ms >= 130) {
         frame_started_ms = millis();
-        render_frame(a->frames[cur_frame], a->palette);
+        splash_phase++;
+        render_hermes_splash();
     }
 }
 
 void splash_next(void) {
-    if (SPLASH_ANIM_COUNT == 0) return;
-    cur_anim = (cur_anim + 1) % SPLASH_ANIM_COUNT;
-    cur_frame = 0;
+    cur_anim = (cur_anim + 1) % 4;
     frame_started_ms = millis();
     last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    render_frame(a->frames[0], a->palette);
-    Serial.printf("splash: -> %s\n", a->name);
+    render_hermes_splash();
+    Serial.printf("splash: hermes mode %u\n", (unsigned)cur_anim);
 }
 
 void splash_pick_for_current_rate(void) {
-    if (SPLASH_ANIM_COUNT == 0) return;
     int g = usage_rate_group();
-    if (g < 0 || g >= GROUP_COUNT) g = 0;
-    if (group_size[g] == 0) return;
-
-    uint8_t slot = group_rotation[g] % group_size[g];
-    group_rotation[g]++;
-    int8_t idx = group_lists[g][slot];
-    if (idx < 0) return;
-
-    cur_anim = (uint16_t)idx;
-    cur_frame = 0;
+    if (g < 0) g = 0;
+    if (g > 3) g = 3;
+    cur_anim = (uint16_t)g;
     frame_started_ms = millis();
     last_pick_ms = frame_started_ms;
-    const splash_anim_def_t *a = &splash_anims[cur_anim];
-    render_frame(a->frames[0], a->palette);
+    render_hermes_splash();
 }
 
 bool splash_is_active(void) { return active; }
@@ -290,3 +278,11 @@ void splash_hide(void) {
 lv_obj_t* splash_get_root(void) {
     return splash_container;
 }
+void splash_set_hint(const char* text) {
+    (void)text;
+}
+
+void splash_show_hint(bool show) {
+    (void)show;
+}
+

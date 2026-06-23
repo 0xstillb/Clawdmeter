@@ -22,6 +22,13 @@ from daemon.claude_usage_daemon_windows import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_codex_autodetect(monkeypatch):
+    """Keep reconnect tests pinned to the Claude path unless they opt in otherwise."""
+    import daemon.claude_usage_daemon_windows as mod
+    monkeypatch.setattr(mod, "_read_codex_credentials", lambda: None)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -401,7 +408,7 @@ def test_next_backoff_at_cap_stays():
 
 
 def test_main_scan_miss_uses_search_backoff():
-    """When scan_for_device returns None, asyncio.wait_for receives search_backoff timeout values."""
+    """When discovery returns None, asyncio.wait_for receives search_backoff timeout values."""
     import daemon.claude_usage_daemon_windows as mod
 
     # Capture main()'s internal stop_event by intercepting asyncio.Event()
@@ -417,7 +424,7 @@ def test_main_scan_miss_uses_search_backoff():
     call_count = [0]
     MAX_CALLS = 3
 
-    async def fake_scan():
+    async def fake_discover():
         return None  # always miss -> slow-search regime
 
     async def fake_wait_for(coro, timeout):
@@ -428,7 +435,7 @@ def test_main_scan_miss_uses_search_backoff():
         raise asyncio.TimeoutError()
 
     with patch("daemon.claude_usage_daemon_windows.asyncio.Event", side_effect=capturing_Event), \
-         patch("daemon.claude_usage_daemon_windows.scan_for_device", side_effect=fake_scan), \
+         patch("daemon.claude_usage_daemon_windows.discover_target", side_effect=fake_discover), \
          patch("daemon.claude_usage_daemon_windows.asyncio.wait_for", side_effect=fake_wait_for):
         _run(mod.main())
 
@@ -459,8 +466,8 @@ def test_main_connect_fail_uses_reconnect_backoff():
     call_count = [0]
     MAX_CALLS = 3
 
-    async def fake_scan():
-        return fake_device  # always finds device
+    async def fake_discover():
+        return fake_device, "scan"  # always finds device
 
     async def fake_connect_and_run(device, event, tray_state=None):
         return False  # always fails -> fast-reconnect regime
@@ -473,7 +480,7 @@ def test_main_connect_fail_uses_reconnect_backoff():
         raise asyncio.TimeoutError()
 
     with patch("daemon.claude_usage_daemon_windows.asyncio.Event", side_effect=capturing_Event), \
-         patch("daemon.claude_usage_daemon_windows.scan_for_device", side_effect=fake_scan), \
+         patch("daemon.claude_usage_daemon_windows.discover_target", side_effect=fake_discover), \
          patch("daemon.claude_usage_daemon_windows.connect_and_run", side_effect=fake_connect_and_run), \
          patch("daemon.claude_usage_daemon_windows.asyncio.wait_for", side_effect=fake_wait_for):
         _run(mod.main())
@@ -507,8 +514,8 @@ def test_main_reconnect_backoff_reset_on_success():
     connect_results = [False, True, False]
     connect_idx = [0]
 
-    async def fake_scan():
-        return fake_device
+    async def fake_discover():
+        return fake_device, "scan"
 
     async def fake_connect_and_run(device, event, tray_state=None):
         idx = connect_idx[0]
@@ -525,7 +532,7 @@ def test_main_reconnect_backoff_reset_on_success():
         raise asyncio.TimeoutError()
 
     with patch("daemon.claude_usage_daemon_windows.asyncio.Event", side_effect=capturing_Event), \
-         patch("daemon.claude_usage_daemon_windows.scan_for_device", side_effect=fake_scan), \
+         patch("daemon.claude_usage_daemon_windows.discover_target", side_effect=fake_discover), \
          patch("daemon.claude_usage_daemon_windows.connect_and_run", side_effect=fake_connect_and_run), \
          patch("daemon.claude_usage_daemon_windows.asyncio.wait_for", side_effect=fake_wait_for):
         _run(mod.main())
@@ -537,13 +544,12 @@ def test_main_reconnect_backoff_reset_on_success():
     assert recorded_timeouts[1] == 1, f"Expected 1 after success reset, got {recorded_timeouts[1]}"
 
 
-def test_main_no_saved_addr_file_or_skip_addr():
-    """main() does not reference SAVED_ADDR_FILE or skip_addr (Windows is stateless - D-04)."""
+def test_main_does_not_use_macos_skip_addr_or_retrieve_connected():
+    """Windows main() may cache addresses, but must not reuse the macOS HID path."""
     import inspect
     import daemon.claude_usage_daemon_windows as mod
 
     source = inspect.getsource(mod.main)
-    assert "SAVED_ADDR_FILE" not in source, "main() must not reference SAVED_ADDR_FILE (D-04)"
     assert "skip_addr" not in source, "main() must not reference skip_addr (macOS-only)"
     assert "retrieve_connected" not in source.lower(), \
         "main() must not reference retrieve_connected (macOS HID path)"

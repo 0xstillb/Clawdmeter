@@ -10,7 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from daemon.claude_usage_daemon_windows import _extract_access_token, read_token, _windows_credential_candidates, _read_expiry
+from daemon.claude_usage_daemon_windows import (
+    BLE_ADDRESS_ENV,
+    _ble_address_override,
+    _extract_access_token,
+    _read_expiry,
+    _saved_ble_address_path,
+    _windows_credential_candidates,
+    clear_cached_address,
+    load_cached_address,
+    read_token,
+    save_cached_address,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -108,6 +119,34 @@ def test_read_expiry_decodes_milliseconds(monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     result = _read_expiry()
     assert result.startswith("2286-"), f"Expected year 2286, got: {result}"
+
+
+def test_ble_address_override_accepts_mac(monkeypatch):
+    monkeypatch.setenv(BLE_ADDRESS_ENV, "AA:BB:CC:DD:EE:FF")
+    assert _ble_address_override() == "AA:BB:CC:DD:EE:FF"
+
+
+def test_ble_address_override_rejects_invalid(monkeypatch):
+    monkeypatch.setenv(BLE_ADDRESS_ENV, "not-an-address")
+    assert _ble_address_override() is None
+
+
+def test_cached_ble_address_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert save_cached_address("AA:BB:CC:DD:EE:FF") is True
+    assert load_cached_address() == "AA:BB:CC:DD:EE:FF"
+    assert _saved_ble_address_path().exists()
+    clear_cached_address()
+    assert load_cached_address() is None
+
+
+def test_cached_ble_address_invalid_file_is_discarded(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    path = _saved_ble_address_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("garbage", encoding="utf-8")
+    assert load_cached_address() is None
+    assert not path.exists()
 
 
 # --- WR-03: regression guard for CR-01 (empty/blank token must not be accepted) ---
