@@ -932,11 +932,13 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t**
     lv_obj_set_style_border_opa(bar, (lv_opa_t)80, 0);
     lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_all(bar, 0, 0);
+    lv_obj_set_style_clip_corner(bar, true, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
+    const int inner_h = L.bar_h > 2 ? L.bar_h - 2 : L.bar_h;
     lv_obj_t* fill = lv_obj_create(bar);
-    lv_obj_set_pos(fill, 0, 0);
-    lv_obj_set_size(fill, 0, L.bar_h);
+    lv_obj_set_pos(fill, 1, (L.bar_h - inner_h) / 2);
+    lv_obj_set_size(fill, 0, inner_h);
     lv_obj_set_style_bg_color(fill, fill_start, 0);
     lv_obj_set_style_bg_opa(fill, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_grad_color(fill, fill_end, 0);
@@ -1021,10 +1023,12 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     if (widgets->bar_fill) {
         const int track_w = L.card_w - L.card_pad_l - L.card_pad_r;
-        int fill_w = (track_w * pct) / 100;
-        if (pct > 0 && fill_w < L.bar_h) fill_w = L.bar_h;
-        if (fill_w > track_w) fill_w = track_w;
-        lv_obj_set_size(widgets->bar_fill, fill_w, L.bar_h);
+        const int inner_w = track_w > 2 ? track_w - 2 : track_w;
+        const int inner_h = L.bar_h > 2 ? L.bar_h - 2 : L.bar_h;
+        int fill_w = (inner_w * pct) / 100;
+        if (pct > 0 && fill_w < inner_h) fill_w = inner_h;
+        if (fill_w > inner_w) fill_w = inner_w;
+        lv_obj_set_size(widgets->bar_fill, fill_w, inner_h);
     }
     lv_label_set_text(widgets->meta_left, meta_left);
     format_panel_meta_right(panel, meta_right, sizeof(meta_right));
