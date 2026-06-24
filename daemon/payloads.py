@@ -140,7 +140,13 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     """
     current_time = time.time() if now is None else now
 
-    def _pct(u: dict) -> int:
+    def _remaining_window_pct(u: dict) -> int:
+        lim = u.get("limit", 0) or 1
+        used = u.get("used", 0) or 0
+        used_pct = max(0, min(100, int(round(used / lim * 100))))
+        return 100 - used_pct
+
+    def _used_window_pct(u: dict) -> int:
         lim = u.get("limit", 0) or 1
         used = u.get("used", 0) or 0
         return max(0, min(100, int(round(used / lim * 100))))
@@ -155,13 +161,13 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
             return 0
         return int(round(secs / 60)) if secs > 0 else 0
 
-    rolling_pct = _pct(parsed.get("rolling", {}))
+    rolling_pct = _remaining_window_pct(parsed.get("rolling", {}))
     rolling_reset = _reset_mins(parsed.get("rolling", {}))
     rolling_has_reset = parsed.get("rolling", {}).get("periodEnd") is not None
-    weekly_pct = _pct(parsed.get("weekly", {}))
+    weekly_pct = _remaining_window_pct(parsed.get("weekly", {}))
     weekly_reset = _reset_mins(parsed.get("weekly", {}))
     weekly_has_reset = parsed.get("weekly", {}).get("periodEnd") is not None
-    monthly_pct = _pct(parsed.get("monthly", {}))
+    monthly_pct = _used_window_pct(parsed.get("monthly", {}))
 
     status = f"m{monthly_pct}" if monthly_pct else "allowed"
 

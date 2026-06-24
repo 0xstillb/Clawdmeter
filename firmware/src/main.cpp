@@ -489,7 +489,8 @@ void loop() {
         if (usage_parse_json(ble_get_data(), &usage)) {
             int g_before = usage_rate_group();
             float rate_pct = usage.top.pct;
-            if (usage.provider == USAGE_PROVIDER_CODEX) {
+            if (usage.provider == USAGE_PROVIDER_CODEX ||
+                usage.provider == USAGE_PROVIDER_GO) {
                 rate_pct = 100.0f - rate_pct;
             }
             usage_rate_sample(rate_pct);
