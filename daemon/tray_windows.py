@@ -17,11 +17,13 @@ Usage::
 Run: python -m pytest daemon/tests/test_windows_tray.py -x -q
 """
 
+import json
 import os
 import sys
 import threading
 import time
 from functools import partial
+from pathlib import Path
 
 # Repo root = the directory that CONTAINS the `daemon` package (this file is
 # <repo>/daemon/tray_windows.py). Resolve it from __file__ so the package
@@ -106,6 +108,116 @@ def header_text(ts: TrayState) -> str:
     if ts.state == "scanning":
         return "Scanning…"   # "Scanning…"
     return f"Error: {ts.reason}"
+
+
+# ── OpenCode Go settings dialog ────────────────────────────────────────────
+
+def _opencode_go_dialog() -> None:
+    """Open a small Tkinter dialog to set OpenCode Go credentials."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    config_dir = Path.home() / ".config" / "clawdmeter"
+    cred_file = config_dir / "opencode-go-credentials.json"
+
+    existing_wid = ""
+    if cred_file.exists():
+        try:
+            data = json.loads(cred_file.read_text(encoding="utf-8"))
+            existing_wid = data.get("workspace_id", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    win = tk.Tk()
+    win.title("OpenCode Go — Credentials")
+    win.resizable(False, False)
+    win.configure(bg="#1e1e1e")
+    win.update_idletasks()
+    w, h = 520, 280
+    x = (win.winfo_screenwidth() - w) // 2
+    y = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+    label_font = ("Segoe UI", 10, "bold")
+    entry_font = ("Consolas", 10)
+    btn_font = ("Segoe UI", 10)
+
+    def _save() -> None:
+        wid = entry_wid.get().strip()
+        cookie = entry_cookie.get().strip()
+        if not wid:
+            messagebox.showerror("Error", "Workspace ID is required", parent=win)
+            return
+        if not cookie:
+            messagebox.showerror("Error", "Auth Cookie is required", parent=win)
+            return
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            cred_data = json.dumps(
+                {"workspace_id": wid, "auth_cookie": cookie}, indent=2
+            )
+            cred_file.write_text(cred_data, encoding="utf-8")
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(
+                    str(cred_file), 0x80
+                )
+            except Exception:
+                pass
+        except OSError as e:
+            messagebox.showerror("Error", f"Failed to save:\n{e}", parent=win)
+            return
+        messagebox.showinfo(
+            "Saved",
+            f"Credentials saved to:\n{cred_file}\n\n"
+            "The daemon will pick them up on the next poll cycle.",
+            parent=win,
+        )
+        win.destroy()
+
+    pad = {"padx": 20, "pady": (20, 0)}
+    pad_small = {"padx": 20, "pady": (8, 0)}
+
+    lbl_info = tk.Label(
+        win,
+        text="Paste your OpenCode Go credentials below.\n"
+             "Get them from: opencode.ai → DevTools (F12) → Cookies → auth",
+        justify=tk.LEFT, bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
+    )
+    lbl_info.pack(anchor="w", **pad)
+
+    frm_id = tk.Frame(win, bg="#1e1e1e")
+    frm_id.pack(fill="x", **pad_small)
+    lbl_id = tk.Label(frm_id, text="Workspace ID", bg="#1e1e1e", fg="#e0e0e0",
+                      font=label_font, width=16, anchor="w")
+    lbl_id.pack(side=tk.LEFT)
+    entry_wid = tk.Entry(frm_id, font=entry_font, bg="#2d2d2d", fg="#ffffff",
+                         insertbackground="#ffffff", relief=tk.FLAT, bd=6)
+    entry_wid.insert(0, existing_wid)
+    entry_wid.pack(side=tk.LEFT, fill="x", expand=True)
+
+    frm_cookie = tk.Frame(win, bg="#1e1e1e")
+    frm_cookie.pack(fill="x", **pad_small)
+    lbl_cookie = tk.Label(frm_cookie, text="Auth Cookie", bg="#1e1e1e", fg="#e0e0e0",
+                          font=label_font, width=16, anchor="w")
+    lbl_cookie.pack(side=tk.LEFT)
+    entry_cookie = tk.Entry(frm_cookie, font=entry_font, bg="#2d2d2d", fg="#ffffff",
+                            insertbackground="#ffffff", relief=tk.FLAT, bd=6)
+    entry_cookie.pack(side=tk.LEFT, fill="x", expand=True)
+
+    frm_btn = tk.Frame(win, bg="#1e1e1e")
+    frm_btn.pack(fill="x", **{"padx": 20, "pady": (20, 20)})
+    btn_save = tk.Button(frm_btn, text="Save", command=_save,
+                         bg="#3a5fd7", fg="white", font=btn_font,
+                         relief=tk.FLAT, padx=20, pady=4, cursor="hand2")
+    btn_save.pack(side=tk.RIGHT, padx=(8, 0))
+    btn_cancel = tk.Button(frm_btn, text="Cancel", command=win.destroy,
+                           bg="#3a3a3a", fg="#cccccc", font=btn_font,
+                           relief=tk.FLAT, padx=20, pady=4, cursor="hand2")
+    btn_cancel.pack(side=tk.RIGHT)
+
+    entry_cookie.focus_set()
+    win.mainloop()
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +346,11 @@ def main() -> None:
     def _on_provider_click(provider_id: str, _icon_ref, _item) -> None:
         _on_provider(provider_id)
 
+    def _on_opencode_go_settings(_icon_ref, _item) -> None:
+        """Open the Tkinter credential dialog in a separate thread so pystray doesn't block."""
+        import threading as _t
+        _t.Thread(target=_opencode_go_dialog, daemon=True).start()
+
     def _provider_item(provider):
         return MenuItem(
             provider.label,
@@ -245,6 +362,7 @@ def main() -> None:
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
         MenuItem("Provider", Menu(*(_provider_item(provider) for provider in provider_choices()))),
+        MenuItem("OpenCode Go Settings...", _on_opencode_go_settings),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
         MenuItem("Quit", _on_quit),
