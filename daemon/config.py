@@ -4,6 +4,10 @@ The tray writes this file and the daemon reads it every poll, so provider
 switches take effect without restarting the process.  Provider metadata lives
 here so adding a future provider updates the tray menu and daemon preference
 normalization from one place.
+
+Plugins are auto-discovered from ``daemon/plugins/`` at runtime; the hardcoded
+``PROVIDERS`` tuple acts as a fallback when the plugins directory is absent
+(e.g. during unit tests or source distributions).
 """
 
 from __future__ import annotations
@@ -12,6 +16,10 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from daemon.plugin_runner import PluginRunner
 
 
 CONFIG_ENV_PROVIDER = "CLAWDMETER_PROVIDER"
@@ -56,11 +64,47 @@ def normalize_provider(value: object) -> str:
 
 
 def provider_choices() -> tuple[ProviderSpec, ...]:
-    return PROVIDERS
+    """Return available provider choices, discovered from plugins.
+
+    Falls back to the hardcoded ``PROVIDERS`` tuple when no plugins are found.
+    """
+    return discover_providers()
 
 
 def auto_provider_ids() -> tuple[str, ...]:
     return tuple(provider.id for provider in PROVIDERS if provider.auto_probe)
+
+
+# ── Plugin-based provider discovery ──────────────────────────────────────
+
+
+def _plugins_dir() -> Path:
+    """Return the expected plugins directory relative to this file."""
+    return Path(__file__).resolve().parent / "plugins"
+
+
+def discover_providers(plugins_dir: str | Path | None = None) -> tuple[ProviderSpec, ...]:
+    """Return provider choices based on plugin discovery.
+
+    Falls back to the hardcoded ``PROVIDERS`` tuple when no plugins
+    directory is found (e.g. unit tests, source distribution).
+    """
+    if plugins_dir is None:
+        plugins_dir = _plugins_dir()
+    try:
+        from daemon.plugin_runner import PluginRunner  # noqa: F811
+
+        runner = PluginRunner(plugins_dir)
+        names = runner.available_providers()
+    except ImportError:
+        names = []
+
+    if not names:
+        return PROVIDERS
+
+    return (ProviderSpec(PROVIDER_AUTO, "Auto", auto_probe=False),) + tuple(
+        ProviderSpec(name, name.replace("-", " ").title()) for name in names
+    )
 
 
 def config_dir() -> Path:

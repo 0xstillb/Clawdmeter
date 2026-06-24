@@ -413,7 +413,7 @@ def main() -> None:
     from pystray import Menu, MenuItem
 
     import daemon.autostart_windows as autostart
-    from daemon.config import provider_choices, provider_preference, set_provider
+    from daemon.config import discover_providers, provider_preference, set_provider
     from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
@@ -481,7 +481,7 @@ def main() -> None:
     icon.menu = Menu(
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
-        MenuItem("Provider", Menu(*(_provider_item(provider) for provider in provider_choices()))),
+        MenuItem("Provider", Menu(*(_provider_item(provider) for provider in discover_providers()))),
         MenuItem("OpenCode Go Settings...", _on_opencode_go_settings),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),

@@ -23,6 +23,7 @@ from bleak.exc import BleakError
 
 from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
 from daemon.payloads import build_claude_usage_payload, build_opencode_go_payload
+from daemon.plugin_runner import PluginRunner, PluginNotFoundError, PluginCrashedError
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
@@ -228,36 +229,34 @@ async def poll_opencode_go_api(creds: dict) -> dict | None:
 
 # ── Provider dispatch ──────────────────────────────────────────────────────
 
-def _select_named_source(provider: str) -> tuple[str | None, object | None, str | None]:
-    if provider == "codex":
-        log("OpenCode Go: Codex provider not supported by macOS daemon yet")
-        return None, None, "Codex unavailable on macOS"
+def _select_named_source(provider: str) -> tuple[str | None, str | None]:
+    """Return (provider_id, error) for a named provider.
 
-    if provider == "go":
-        creds = _read_opencode_go_credentials()
-        if creds is not None:
-            return "go", creds, None
-        return None, None, "OpenCode Go credentials missing — set OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE"
+    Uses ``PluginRunner`` to check if the plugin exists on disk.
+    No credential checking here — the plugin handles that internally.
+    """
+    try:
+        from daemon.plugin_runner import PluginRunner
+        runner = PluginRunner(Path(__file__).resolve().parent / "plugins")
+        if runner.has_plugin(provider):
+            return provider, None
+    except Exception:
+        pass
 
-    if provider == "claude":
-        token = read_token()
-        if token:
-            return "claude", token, None
-        return None, None, "token expired — run claude login"
-
-    return None, None, f"Provider unavailable: {provider}"
+    return None, f"Provider unavailable: {provider}"
 
 
-def _select_usage_source(*, now: float | None = None) -> tuple[str | None, object | None, str | None]:
+def _select_usage_source(*, now: float | None = None) -> tuple[str | None, str | None]:
+    """Return (provider_id, error) based on user preference or auto-probe."""
     pref = provider_preference()
     if pref != PROVIDER_AUTO:
-        return _select_named_source(pref)
+        return pref, None if pref != PROVIDER_AUTO else (None, "Provider unavailable")
     # Auto: probe providers in order
     for provider_id in auto_provider_ids():
-        source, data, _error = _select_named_source(provider_id)
+        source, _error = _select_named_source(provider_id)
         if source is not None:
-            return source, data, None
-    return None, None, "No usage source found"
+            return source, None
+    return None, "No usage source found"
 
 
 def load_cached_address() -> str | None:
@@ -480,14 +479,21 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                source, source_data, source_error = _select_usage_source(now=now)
+                source, source_error = _select_usage_source(now=now)
                 if not source:
                     log(f"{source_error}; skipping poll")
                 else:
-                    if source == "go":
-                        payload = await poll_opencode_go_api(source_data)
-                    else:
-                        payload = await poll_claude_api(source_data)
+                    # Use PluginRunner to invoke the provider plugin
+                    runner = PluginRunner(Path(__file__).resolve().parent / "plugins")
+                    try:
+                        resp = await runner.run(source)
+                        payload = resp.payload if resp.ok else None
+                        if not resp.ok:
+                            log(f"{resp.error}; skipping poll")
+                    except (PluginNotFoundError, PluginCrashedError) as e:
+                        log(f"Plugin {source} error: {e}")
+                        payload = None
+
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()

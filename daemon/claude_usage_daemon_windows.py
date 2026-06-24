@@ -31,6 +31,7 @@ from bleak.exc import BleakError
 
 from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
 from daemon.payloads import build_claude_usage_payload, build_codex_usage_payload, build_opencode_go_payload
+from daemon.plugin_runner import PluginRunner, PluginNotFoundError, PluginCrashedError
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
@@ -495,39 +496,38 @@ async def poll_opencode_go_api(creds: dict) -> dict | None:
     return build_opencode_go_payload(parsed, now=time.time())
 
 
-def _select_named_usage_source(provider: str) -> tuple[str | None, object | None, str | None]:
-    if provider == "codex":
-        codex_creds = _read_codex_credentials()
-        if codex_creds is not None:
-            return "codex", codex_creds, None
-        return None, None, "Codex sign-in missing"
+def _select_named_usage_source(provider: str) -> tuple[str | None, str | None]:
+    """Return (provider_id, error) for a named provider.
 
-    if provider == "go":
-        go_creds = _read_opencode_go_credentials()
-        if go_creds is not None:
-            return "go", go_creds, None
-        return None, None, "OpenCode Go credentials missing"
+    Uses ``PluginRunner`` to check if the plugin exists on disk.
+    No credential checking here — the plugin handles that internally.
+    """
+    try:
+        from daemon.plugin_runner import PluginRunner
+        runner = PluginRunner(Path(__file__).resolve().parent / "plugins")
+        if runner.has_plugin(provider):
+            return provider, None
+    except Exception:
+        pass
 
-    if provider == "claude":
-        token = read_token()
-        if token:
-            return "claude", token, None
-        return None, None, "token expired — run claude login"
-
-    return None, None, f"Provider unavailable: {provider}"
+    return None, f"Provider unavailable: {provider}"
 
 
-def _select_usage_source(*, now: float | None = None) -> tuple[str | None, object | None, str | None]:
+def _select_usage_source(*, now: float | None = None) -> tuple[str | None, str | None]:
+    """Return (provider_id, error) based on user preference or auto-probe.
+
+    Auto-probe: return the first available plugin.
+    """
     pref = _provider_preference()
 
     if pref != PROVIDER_AUTO:
-        return _select_named_usage_source(pref)
+        return pref, None if pref != PROVIDER_AUTO else (None, "Provider unavailable")
 
     for provider in auto_provider_ids():
-        source, data, _error = _select_named_usage_source(provider)
+        source, _error = _select_named_usage_source(provider)
         if source is not None:
-            return source, data, None
-    return None, None, "No usage source found"
+            return source, None
+    return None, "No usage source found"
 
 
 def _payload_for_wire(payload: dict) -> dict:
@@ -795,29 +795,39 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             elapsed = now - last_poll
             if session.refresh_requested.is_set() or elapsed >= POLL_INTERVAL:
                 session.refresh_requested.clear()
-                source, source_data, source_error = _select_usage_source(now=now)
+                source, source_error = _select_usage_source(now=now)
                 if not source:
                     log(f"{source_error}; skipping poll")
                     if tray_state and source_error:
                         tray_state.set_error(source_error)
                 else:
-                    if source == "codex":
-                        payload = await poll_codex_api(source_data)
-                    elif source == "go":
-                        try:
-                            payload = await poll_opencode_go_api(source_data)
-                        except AuthError:
-                            if tray_state:
-                                tray_state.set_error("OpenCode Go cookie expired — right-click tray → Settings")
+                    # Use PluginRunner to invoke the provider plugin
+                    runner = PluginRunner(Path(__file__).resolve().parent / "plugins")
+                    last_err = None
+                    try:
+                        resp = await runner.run(
+                            source,
+                            prev_payload=None,
+                            last_error=last_err,
+                        )
+                        if resp.ok and resp.payload:
+                            payload = resp.payload
+                        else:
                             payload = None
-                    else:
-                        try:
-                            payload = await poll_api(source_data)
-                        except AuthError:
-                            # Real 401/403 — token genuinely needs a refresh.
-                            if tray_state:
-                                tray_state.set_error("token expired — run claude login")
-                            payload = None
+                            last_err = resp.error
+                            if not resp.retry:
+                                # Permanent failure — show toast
+                                log(f"{resp.error}; notifying user")
+                                if tray_state and resp.error:
+                                    tray_state.set_error(resp.error)
+                            else:
+                                log(f"{resp.error}; will retry")
+                    except (PluginNotFoundError, PluginCrashedError) as e:
+                        log(f"Plugin {source} error: {e}")
+                        payload = None
+                        if tray_state:
+                            tray_state.set_error(str(e))
+
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()

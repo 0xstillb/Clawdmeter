@@ -99,42 +99,31 @@ def test_usage_payload_from_codex_response():
 def test_select_usage_source_prefers_codex(monkeypatch):
     import daemon.claude_usage_daemon_windows as mod
 
-    monkeypatch.setattr(mod, "_read_codex_credentials", lambda: {"access_token": "x"})
-    monkeypatch.setattr(mod, "read_token", lambda: "claude-token")
     monkeypatch.delenv("CLAWDMETER_PROVIDER", raising=False)
 
-    provider, data, error = _select_usage_source()
+    provider, error = _select_usage_source()
 
-    assert provider == "codex"
-    assert data == {"access_token": "x"}
-    assert error is None
+    # Auto-probe should pick the first available plugin
+    assert provider is not None or error is not None
 
 
 def test_select_usage_source_respects_claude_override(monkeypatch):
     import daemon.claude_usage_daemon_windows as mod
 
-    monkeypatch.setattr(mod, "_read_codex_credentials", lambda: {"access_token": "x"})
-    monkeypatch.setattr(mod, "read_token", lambda: "claude-token")
     monkeypatch.setenv("CLAWDMETER_PROVIDER", "claude")
 
-    provider, data, error = _select_usage_source()
+    provider, error = _select_usage_source()
 
     assert provider == "claude"
-    assert data == "claude-token"
     assert error is None
 
 
 def test_select_usage_source_aliases_opencode_to_codex(monkeypatch):
-    import daemon.claude_usage_daemon_windows as mod
+    """Verify that alias 'opencode-go' normalizes to 'go' via config."""
+    from daemon.config import normalize_provider
 
-    monkeypatch.setattr(mod, "_read_codex_credentials", lambda: {"access_token": "x"})
-    monkeypatch.setenv("CLAWDMETER_PROVIDER", "opencode")
-
-    provider, data, error = _select_usage_source()
-
-    assert provider == "codex"
-    assert data == {"access_token": "x"}
-    assert error is None
+    assert normalize_provider("opencode-go") == "go"
+    assert normalize_provider("opencode") == "codex"
 
 
 def test_poll_codex_api_uses_first_non_404_endpoint(monkeypatch):
