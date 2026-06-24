@@ -443,14 +443,8 @@ def main() -> None:
 
     # --- menu ---
     def _on_quit(_icon_ref, _item) -> None:
-        """Graceful shutdown — signal daemon to disconnect BLE, then exit."""
-        if ts.stop_event is not None:
-            ts.stop_event.set()            # tell daemon loop to stop
-            ts.stop_event = None            # signal only once
-        # Give the daemon ~1.5s to run client.disconnect() in its finally block,
-        # so the ESP32 gets a clean GATT disconnect notification.
-        time.sleep(1.5)
-        _icon_ref.stop()
+        """Kill process immediately so autostart restarts with fresh credentials."""
+        os._exit(1)
 
     def _on_toggle(_icon_ref, _item) -> None:
         if autostart.is_enabled():
