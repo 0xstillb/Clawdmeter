@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""OpenCode Go provider plugin for Clawdmeter.
+
+Fetches the OpenCode Go subscription dashboard and returns a BLE payload.
+
+Credentials (checked in order):
+  1. OPENCODE_GO_WORKSPACE_ID / OPENCODE_GO_AUTH_COOKIE env vars
+  2. ~/.config/clawdmeter/opencode-go-credentials.json (keys: workspace_id, auth_cookie)
+  3. ~/.config/opencode/opencode-go-usage.json (keys: workspaceId, authCookie)
+
+Protocol: reads ONE JSON line from stdin (PluginRequest), writes ONE JSON
+line to stdout (PluginResponse), then exits.
+Pass --debug for verbose stderr logging.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+# Add repo root so imports work when run standalone
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import httpx
+
+from daemon.plugin_protocol import PluginRequest, PluginResponse
+from daemon.payloads import build_opencode_go_payload
+
+# ── constants ───────────────────────────────────────────────────────────────
+
+GO_DASHBOARD_URL = "https://opencode.ai/workspace/{workspace_id}/go"
+_USER_AGENT = "clawdmeter/1.0"
+_TIMEOUT = 20.0
+
+# Regex patterns to extract usage JS objects from dashboard HTML
+_PATTERNS = {
+    "rolling": r'rollingUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+    "weekly": r'weeklyUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+    "monthly": r'monthlyUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _debug(*args: object) -> None:
+    """Emit debug log to stderr when --debug is passed."""
+    if "--debug" in sys.argv:
+        print("[opencode-go]", *args, file=sys.stderr)
+
+
+def _read_credentials() -> dict | None:
+    """Return {workspace_id, auth_cookie} from env or config file, or None.
+
+    Priority:
+      1. OPENCODE_GO_WORKSPACE_ID / OPENCODE_GO_AUTH_COOKIE env vars
+      2. ~/.config/clawdmeter/opencode-go-credentials.json
+      3. ~/.config/opencode/opencode-go-usage.json
+    """
+    wid = os.environ.get("OPENCODE_GO_WORKSPACE_ID", "").strip()
+    cookie = os.environ.get("OPENCODE_GO_AUTH_COOKIE", "").strip()
+    if wid and cookie:
+        _debug("using env credentials")
+        return {"workspace_id": wid, "auth_cookie": cookie}
+
+    config_paths = [
+        Path.home() / ".config" / "clawdmeter" / "opencode-go-credentials.json",
+        Path.home() / ".config" / "opencode" / "opencode-go-usage.json",
+    ]
+    for path in config_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        wid = data.get("workspaceId") or data.get("workspace_id") or ""
+        cookie = data.get("authCookie") or data.get("auth_cookie") or ""
+        if isinstance(wid, str) and isinstance(cookie, str) and wid and cookie:
+            _debug(f"using credentials from {path}")
+            return {"workspace_id": wid, "auth_cookie": cookie}
+    return None
+
+
+def _parse_html(html: str) -> dict | None:
+    """Extract rolling/weekly/monthly usage data from dashboard HTML.
+
+    The page embeds JS variables like::
+
+        rollingUsage: $R[42]={"used":0.0,"limit":12.0,...}
+        weeklyUsage:  $R[43]={"used":5.1,"limit":30.0,...}
+        monthlyUsage: $R[44]={"used":5.0,"limit":60.0,...}
+    """
+    result: dict = {}
+    for key, pat in _PATTERNS.items():
+        m = re.search(pat, html)
+        if not m:
+            _debug(f"{key} usage not found in dashboard HTML")
+            continue
+        raw = m.group(1)
+        # Fix unquoted JS object keys -> valid JSON
+        quoted = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3', raw)
+        try:
+            data = json.loads(quoted)
+        except json.JSONDecodeError as e:
+            _debug(f"failed to parse {key} data: {e}")
+            continue
+        if isinstance(data, dict):
+            result[key] = data
+
+    return result if result else None
+
+
+def _is_auth_failure(msg: str | None) -> bool:
+    """Return True if *msg* indicates a prior auth/cookie failure."""
+    if not msg:
+        return False
+    lowered = msg.lower()
+    if "auth" in lowered or "cookie" in lowered or "401" in msg or "403" in msg:
+        # Be specific: only match known auth-failure phrases
+        return (
+            "auth fail" in lowered
+            or "auth failed" in lowered
+            or "cookie expired" in lowered
+            or "cookie may be expired" in lowered
+            or "not configured" in lowered
+        )
+    return False
+
+
+# ── main poll logic ─────────────────────────────────────────────────────────
+
+
+async def poll() -> PluginResponse:
+    """Read PluginRequest, fetch dashboard, return PluginResponse."""
+    req = PluginRequest.from_stdin()
+    _debug(f"request: action={req.action}, last_error={req.last_error!r}")
+
+    # ── credentials ────────────────────────────────────────────────────
+    creds = _read_credentials()
+    if creds is None:
+        return PluginResponse.failure(
+            "OpenCode Go credentials not configured — set "
+            "OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE "
+            "env vars or create "
+            "~/.config/clawdmeter/opencode-go-credentials.json",
+            retry=True,
+        )
+
+    wid = creds.get("workspace_id", "")
+    cookie = creds.get("auth_cookie", "")
+    if not wid or not cookie:
+        return PluginResponse.failure(
+            "OpenCode Go credentials incomplete "
+            "(missing workspace_id or auth_cookie)",
+            retry=True,
+        )
+
+    # ── repeated auth failure → stop retrying ─────────────────────────
+    if _is_auth_failure(req.last_error):
+        _debug("repeated auth failure detected, returning retry:false")
+        return PluginResponse.failure(
+            "OpenCode Go: auth cookie expired — please update your credentials",
+            retry=False,
+        )
+
+    # ── fetch dashboard ────────────────────────────────────────────────
+    url = GO_DASHBOARD_URL.format(workspace_id=wid)
+    headers = {
+        "Cookie": f"auth={cookie}",
+        "User-Agent": _USER_AGENT,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
+            resp = await http.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        _debug(f"HTTP request failed: {e}")
+        return PluginResponse.failure(f"Network error: {e}", retry=True)
+
+    # ── HTTP response handling ─────────────────────────────────────────
+    if resp.status_code in (401, 403):
+        _debug(f"auth failed (HTTP {resp.status_code})")
+        return PluginResponse.failure(
+            f"OpenCode Go: auth failed (HTTP {resp.status_code}) "
+            f"— cookie may be expired",
+            retry=False,
+        )
+
+    if resp.status_code >= 400:
+        _debug(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        return PluginResponse.failure(
+            f"OpenCode Go: HTTP {resp.status_code}", retry=True
+        )
+
+    # ── parse HTML ─────────────────────────────────────────────────────
+    parsed = _parse_html(resp.text)
+    if parsed is None:
+        _debug("no usage data found in dashboard")
+        return PluginResponse.failure(
+            "OpenCode Go: no usage data found in dashboard HTML",
+            retry=True,
+        )
+
+    # ── build and return payload ───────────────────────────────────────
+    payload = build_opencode_go_payload(parsed, now=time.time())
+    return PluginResponse.success(payload)
+
+
+async def main() -> None:
+    result = await poll()
+    print(result.to_json())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

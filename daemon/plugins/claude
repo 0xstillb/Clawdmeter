@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Claude provider plugin for Clawdmeter.
+
+Polls the Anthropic Messages API rate-limit headers and returns a BLE payload.
+
+Credentials (checked in order):
+  1. ``$CLAUDE_CREDENTIALS_PATH`` or ``$CLAUDE_CONFIG_DIR`` env vars
+  2. ``~/.claude/.credentials.json``
+  3. macOS Keychain (service "Claude Code-credentials")
+
+Dependencies: httpx
+Protocol: DAEMON_PLUGIN_PROTOCOL.md
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Add repo root so imports work when run standalone
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import httpx
+
+from daemon.plugin_protocol import PluginRequest, PluginResponse
+from daemon.payloads import build_claude_usage_payload
+
+
+API_URL = "https://api.anthropic.com/v1/messages"
+API_HEADERS_TEMPLATE = {
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "oauth-2025-04-20",
+    "Content-Type": "application/json",
+    "User-Agent": "claude-code/2.1.5",
+}
+API_BODY = {
+    "model": "claude-haiku-4-5-20251001",
+    "max_tokens": 1,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+def _extract_access_token(blob: str) -> str | None:
+    """Pull the accessToken out of a credentials blob."""
+    blob = blob.strip()
+    if not blob:
+        return None
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        tok = data.get("accessToken")
+        if isinstance(tok, str) and tok.strip():
+            return tok
+        for v in data.values():
+            if isinstance(v, dict):
+                tok = v.get("accessToken")
+                if isinstance(tok, str) and tok.strip():
+                    return tok
+    m = re.search(r'"accessToken"\s*:\s*"([^"]+)"', blob)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_\-\.~+/=]{20,}", blob):
+        return blob
+    return None
+
+
+def _read_token() -> str | None:
+    """Find and return the Claude access token."""
+    # Env overrides
+    if override := os.environ.get("CLAUDE_CREDENTIALS_PATH"):
+        candidates = [Path(override)]
+    elif config_dir := os.environ.get("CLAUDE_CONFIG_DIR"):
+        candidates = [Path(config_dir) / ".credentials.json"]
+    else:
+        home = Path.home()
+        candidates = [home / ".claude" / ".credentials.json"]
+
+    for path in candidates:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        token = _extract_access_token(raw)
+        if token:
+            return token
+
+    # macOS Keychain fallback
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s", "Claude Code-credentials",
+                    "-a", os.environ.get("USER", ""),
+                    "-w",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return _extract_access_token(out.stdout)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    return None
+
+
+async def poll_api(token: str) -> dict | None:
+    """POST to Anthropic API and return BLE payload or None."""
+    headers = dict(API_HEADERS_TEMPLATE)
+    headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.post(API_URL, headers=headers, json=API_BODY)
+    except httpx.HTTPError as e:
+        print(f"[claude] API call failed: {e}", file=sys.stderr)
+        return None
+
+    if resp.status_code in (401, 403):
+        print(f"[claude] Auth failed: HTTP {resp.status_code}", file=sys.stderr)
+        return None  # caller handles retry=false
+
+    if resp.status_code >= 400:
+        print(f"[claude] HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+        return None
+
+    now = time.time()
+    return build_claude_usage_payload(resp.headers, now=now)
+
+
+async def main() -> None:
+    req = PluginRequest.from_stdin()
+
+    token = _read_token()
+    if token is None:
+        print(PluginResponse.failure(
+            "token expired — run claude login", retry=False
+        ).to_json())
+        return
+
+    payload = await poll_api(token)
+    if payload is None:
+        # Check if this looks like a permanent auth failure
+        if req.last_error and ("token expired" in req.last_error):
+            print(PluginResponse.failure(
+                "token expired — run claude login", retry=False
+            ).to_json())
+        else:
+            print(PluginResponse.failure(
+                "API call failed (transient)", retry=True
+            ).to_json())
+        return
+
+    print(PluginResponse.success(payload).to_json())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

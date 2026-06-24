@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Codex provider plugin for Clawdmeter.
+
+Polls the OpenAI Codex usage endpoint and returns a BLE payload.
+
+Credentials:
+  Reads access_token from Codex auth.json (found at:
+  ``$CODEX_HOME/auth.json``, ``~/.Codex/auth.json``, or ``~/.codex/auth.json``).
+  Includes OAuth token refresh via ``auth.openai.com/oauth/token``.
+
+Dependencies: httpx
+Protocol: DAEMON_PLUGIN_PROTOCOL.md
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import datetime
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+# Add repo root so imports work when run standalone
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import httpx
+
+from daemon.plugin_protocol import PluginRequest, PluginResponse
+from daemon.payloads import build_codex_usage_payload
+
+
+CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_USAGE_URLS = (
+    "https://chatgpt.com/backend-api/wham/usage",
+    "https://chatgpt.com/backend-api/codex/usage",
+)
+
+
+def _account_id_from_id_token(id_token: object) -> str | None:
+    if not isinstance(id_token, str):
+        return None
+    parts = id_token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload + padding)
+        claims = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    auth = claims.get("https://api.openai.com/auth")
+    if not isinstance(auth, dict):
+        return None
+    account_id = auth.get("chatgpt_account_id")
+    return account_id if isinstance(account_id, str) else None
+
+
+def _read_credentials() -> dict | None:
+    """Return creds dict or None."""
+    if override := os.environ.get("CODEX_HOME"):
+        candidates = [Path(override) / "auth.json"]
+    else:
+        home = Path.home()
+        candidates = [
+            home / ".Codex" / "auth.json",
+            home / ".codex" / "auth.json",
+        ]
+    for path in candidates:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            print(f"[codex] auth.json parse failed at {path}", file=sys.stderr)
+            continue
+        if not isinstance(data, dict):
+            continue
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            continue
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+        account_id = tokens.get("account_id") or _account_id_from_id_token(
+            tokens.get("id_token")
+        )
+        if isinstance(access_token, str) and access_token:
+            return {
+                "path": path,
+                "data": data,
+                "access_token": access_token,
+                "refresh_token": refresh_token if isinstance(refresh_token, str) else None,
+                "account_id": account_id if isinstance(account_id, str) else None,
+            }
+    return None
+
+
+def _write_credentials(creds: dict) -> bool:
+    path = creds.get("path")
+    data = creds.get("data")
+    if not isinstance(path, Path) or not isinstance(data, dict):
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as e:
+        print(f"[codex] auth.json write failed: {e}", file=sys.stderr)
+        return False
+    return True
+
+
+async def _refresh_credentials(creds: dict) -> dict | None:
+    refresh_token = creds.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        print("[codex] refresh token unavailable", file=sys.stderr)
+        return None
+
+    body = {
+        "client_id": CODEX_REFRESH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.post(
+                CODEX_REFRESH_TOKEN_URL,
+                headers={"Content-Type": "application/json"},
+                json=body,
+            )
+    except httpx.HTTPError as e:
+        print(f"[codex] OAuth refresh failed: {e}", file=sys.stderr)
+        return None
+    if resp.status_code >= 400:
+        print(f"[codex] OAuth refresh HTTP {resp.status_code}", file=sys.stderr)
+        return None
+
+    try:
+        refresh_data = resp.json()
+    except json.JSONDecodeError:
+        print("[codex] OAuth refresh response was not JSON", file=sys.stderr)
+        return None
+
+    access_token = refresh_data.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        print("[codex] OAuth refresh response missing access_token", file=sys.stderr)
+        return None
+
+    new_refresh_token = refresh_data.get("refresh_token")
+    if not isinstance(new_refresh_token, str) or not new_refresh_token:
+        new_refresh_token = refresh_token
+
+    data = creds.get("data")
+    if not isinstance(data, dict):
+        return None
+    tokens = data.setdefault("tokens", {})
+    if not isinstance(tokens, dict):
+        return None
+
+    tokens["access_token"] = access_token
+    tokens["refresh_token"] = new_refresh_token
+    id_token = refresh_data.get("id_token")
+    if isinstance(id_token, str):
+        tokens["id_token"] = id_token
+    data["last_refresh"] = (
+        datetime.datetime.now(datetime.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+    refreshed = {
+        **creds,
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "account_id": creds.get("account_id") or _account_id_from_id_token(id_token),
+        "data": data,
+    }
+    if not _write_credentials(refreshed):
+        print("[codex] OAuth refresh succeeded but auth.json could not be updated", file=sys.stderr)
+    return refreshed
+
+
+async def poll_api(creds: dict, *, retry_on_401: bool = True) -> dict | None:
+    """Fetch Codex usage and return BLE payload or None."""
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {creds['access_token']}",
+        "User-Agent": "codex-cli",
+    }
+    account_id = creds.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+
+    last_status = None
+    for url in CODEX_USAGE_URLS:
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                resp = await http.get(url, headers=headers)
+        except httpx.HTTPError as e:
+            print(f"[codex] usage call failed: {e}", file=sys.stderr)
+            return None
+
+        if resp.status_code == 404:
+            last_status = 404
+            continue
+        if resp.status_code == 401 and retry_on_401:
+            print("[codex] HTTP 401; attempting OAuth refresh", file=sys.stderr)
+            refreshed = await _refresh_credentials(creds)
+            if refreshed is None:
+                return None
+            return await poll_api(refreshed, retry_on_401=False)
+        if resp.status_code >= 400:
+            print(f"[codex] HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+            return None
+
+        try:
+            payload = resp.json()
+        except json.JSONDecodeError:
+            print("[codex] response was not JSON", file=sys.stderr)
+            return None
+
+        if not isinstance(payload, dict):
+            continue
+        try:
+            return build_codex_usage_payload(payload, now=time.time())
+        except ValueError as e:
+            print(f"[codex] payload parse error: {e}", file=sys.stderr)
+            return None
+
+    if last_status == 404:
+        print("[codex] usage endpoint unavailable", file=sys.stderr)
+    return None
+
+
+async def main() -> None:
+    req = PluginRequest.from_stdin()
+
+    creds = _read_credentials()
+    if creds is None:
+        print(PluginResponse.failure(
+            "Codex sign-in missing — run codex login", retry=False
+        ).to_json())
+        return
+
+    payload = await poll_api(creds)
+    if payload is None:
+        if req.last_error and ("sign-in" in req.last_error.lower()):
+            print(PluginResponse.failure(
+                "Codex sign-in missing — run codex login", retry=False
+            ).to_json())
+        else:
+            print(PluginResponse.failure(
+                "Codex usage fetch failed (transient)", retry=True
+            ).to_json())
+        return
+
+    print(PluginResponse.success(payload).to_json())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
