@@ -1,6 +1,6 @@
 #!/bin/bash
 # Take a screenshot from the Waveshare AMOLED display via LVGL snapshot.
-# Usage: ./screenshot.sh [output.png] [port]
+# Usage: ./scripts/linux/screenshot.sh [output.png] [port]
 # Default port: /dev/cu.usbmodem101 on macOS, /dev/ttyACM0 on Linux.
 
 OUTPUT="${1:-screenshot.png}"

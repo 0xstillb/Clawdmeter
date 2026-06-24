@@ -1,7 +1,7 @@
 # Windows Setup and Run Guide
 
 This guide covers running the Clawdmeter Windows daemon on native Windows hardware.
-It includes the turnkey `install-windows.ps1` bootstrap (tray icon + login autostart),
+It includes the turnkey `scripts/windows/install.ps1` bootstrap (tray icon + login autostart),
 the manual-run fallback, and how to manage or remove autostart.
 
 ---
@@ -81,7 +81,7 @@ Open a PowerShell terminal and `cd` to the repository root.
 
 ### Easiest path: double-click launcher
 
-Double-click `Start Clawdmeter.cmd` from the repository folder. It will:
+Double-click `scripts/windows/Start Clawdmeter.cmd` from the repository folder. It will:
 
 1. Create `.venv` if needed.
 2. Install/check the Windows dependencies.
@@ -223,7 +223,7 @@ Press **Ctrl+C** in the terminal. The daemon logs `Daemon stopping` and exits cl
 Run this once from the repository root in PowerShell (a native Windows path):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 ```
 
 The script does four things in order and logs progress at each step:

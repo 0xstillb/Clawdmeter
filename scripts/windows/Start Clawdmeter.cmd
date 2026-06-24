@@ -1,13 +1,14 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-cd /d "%~dp0"
+for %%I in ("%~dp0..\..") do set "REPO_ROOT=%%~fI"
+cd /d "%REPO_ROOT%"
 
-set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
+set "PYTHON_EXE=%REPO_ROOT%\.venv\Scripts\python.exe"
 set "REQ_FILE=daemon\requirements-windows.txt"
-set "TRAY_SCRIPT=%CD%\daemon\tray_windows.py"
-set "UV_CACHE_DIR=%CD%\.codex-tmp\uv-cache"
-set "UV_PYTHON_INSTALL_DIR=%CD%\.codex-tmp\uv-python"
+set "TRAY_SCRIPT=%REPO_ROOT%\daemon\tray_windows.py"
+set "UV_CACHE_DIR=%REPO_ROOT%\.codex-tmp\uv-cache"
+set "UV_PYTHON_INSTALL_DIR=%REPO_ROOT%\.codex-tmp\uv-python"
 set "UV_EXE="
 
 set "CLAWDMETER_CONFIG_DIR=%USERPROFILE%\.config\clawdmeter"
@@ -201,14 +202,14 @@ echo First run may need internet access and may take a minute.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { irm https://astral.sh/uv/install.ps1 | iex } catch { exit 1 }"
 if errorlevel 1 (
     echo Could not install uv automatically.
-    echo Check your internet connection, then run Start Clawdmeter.cmd again.
+    echo Check your internet connection, then run scripts\windows\Start Clawdmeter.cmd again.
     exit /b 1
 )
 
 call :find_uv
 if errorlevel 1 (
     echo uv installed, but this window cannot find it yet.
-    echo Close this window and double-click Start Clawdmeter.cmd again.
+    echo Close this window and double-click scripts\windows\Start Clawdmeter.cmd again.
     exit /b 1
 )
 exit /b 0
@@ -236,7 +237,7 @@ if errorlevel 1 exit /b 1
 "%PYTHON_EXE%" -c "import sys" >nul 2>nul
 if errorlevel 1 (
     echo Python environment was created but did not start correctly.
-    echo Delete the .venv folder and run Start Clawdmeter.cmd again.
+    echo Delete the .venv folder and run scripts\windows\Start Clawdmeter.cmd again.
     exit /b 1
 )
 exit /b 0

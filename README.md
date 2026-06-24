@@ -35,6 +35,15 @@ Boards supported out of the box:
 
 **Porting to another board:** the firmware is a thin HAL with per-board folders under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env — `main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md) for the interfaces a port must implement.
 
+## Repo layout
+
+- `firmware/` — ESP32 firmware and board ports
+- `daemon/` — shared host-daemon source and provider plugins
+- `scripts/linux/`, `scripts/macos/`, `scripts/windows/` — OS-specific install/flash/run helpers
+- `docs/user/` — end-user setup guides
+- `docs/dev/` — architecture and design notes
+- `docs/porting/` — board-porting documentation
+
 ## Prerequisites
 
 - Linux (tested on Ubuntu), macOS, or Windows 10/11
@@ -51,11 +60,11 @@ The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were 
 ### Flash the firmware
 
 ```bash
-./flash-mac.sh waveshare_amoled_216                       # auto-detects /dev/cu.usbmodem*
-./flash-mac.sh waveshare_amoled_18  /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+./scripts/macos/flash.sh waveshare_amoled_216                       # auto-detects /dev/cu.usbmodem*
+./scripts/macos/flash.sh waveshare_amoled_18  /dev/cu.usbmodem1101  # or pass an explicit USB serial port
 ```
 
-The board env name is required. Run `./flash-mac.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
+The board env name is required. Run `./scripts/macos/flash.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
 
 ### Pair the device
 
@@ -66,7 +75,7 @@ After flashing, open **System Settings → Bluetooth** and click *Connect* next 
 The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
 
 ```bash
-./install-mac.sh
+./scripts/macos/install.sh
 ```
 
 The installer creates a Python venv in `daemon/.venv/`, installs `bleak` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is launched interactively so macOS prompts for Bluetooth permission.
@@ -85,11 +94,11 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 ### Flash the firmware
 
 ```bash
-./flash.sh waveshare_amoled_216                  # defaults to /dev/ttyACM0
-./flash.sh waveshare_amoled_18  /dev/ttyACM1     # or pass an explicit USB serial port
+./scripts/linux/flash.sh waveshare_amoled_216                  # defaults to /dev/ttyACM0
+./scripts/linux/flash.sh waveshare_amoled_18  /dev/ttyACM1     # or pass an explicit USB serial port
 ```
 
-The board env name is required. Run `./flash.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
+The board env name is required. Run `./scripts/linux/flash.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
 
 ### Pair the device
 
@@ -111,7 +120,7 @@ To re-pair later, hold the power button for 3 seconds then release — the devic
 The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
 
 ```bash
-./install.sh
+./scripts/linux/install.sh
 systemctl --user start claude-usage-daemon
 ```
 
@@ -144,14 +153,14 @@ The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetoo
 
 ### Install the daemon (recommended)
 
-Easiest path: double-click `Start Clawdmeter.cmd` from the repository folder.
+Easiest path: double-click `scripts/windows/Start Clawdmeter.cmd` from the repository folder.
 It creates/checks `.venv`, installs the Windows dependencies, enables Start at
 login, and starts the tray app without a console window.
 
 Manual path from the repo root in PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 ```
 
 This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo requirements, registers a per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray app headlessly (no console window). `pip` may download those packages from PyPI if they are not already cached.
@@ -189,6 +198,8 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 | `token expired` toast / `API HTTP 401` | Re-run `claude login`, then restart the daemon. |
 | `Connection failed` | Toggle Windows Bluetooth off/on in Settings. |
 | `Warning: running under Linux/WSL` | Run from a native PowerShell window, not a WSL shell. |
+
+Full Windows tray/setup guide: [`docs/user/windows-daemon.md`](docs/user/windows-daemon.md)
 
 ## How it works
 

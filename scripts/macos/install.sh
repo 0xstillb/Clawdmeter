@@ -1,14 +1,15 @@
 #!/bin/bash
 # macOS installer for Clawdmeter daemon (Python + bleak + launchd).
-# Mirrors install.sh but uses LaunchAgents instead of systemd user units.
+# Mirrors scripts/linux/install.sh but uses LaunchAgents instead of systemd user units.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SERVICE_LABEL="com.user.claude-usage-daemon"
-PLIST_SRC="$SCRIPT_DIR/daemon/$SERVICE_LABEL.plist"
+PLIST_SRC="$REPO_ROOT/daemon/$SERVICE_LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
-VENV_DIR="$SCRIPT_DIR/daemon/.venv"
-DAEMON_PY="$SCRIPT_DIR/daemon/claude_usage_daemon.py"
+VENV_DIR="$REPO_ROOT/daemon/.venv"
+DAEMON_PY="$REPO_ROOT/daemon/claude_usage_daemon.py"
 LOG_DIR="$HOME/Library/Logs"
 LOG_OUT="$LOG_DIR/claude-usage-daemon.out.log"
 LOG_ERR="$LOG_DIR/claude-usage-daemon.err.log"
@@ -43,7 +44,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 sed \
     -e "s|__PYTHON_BIN__|${PYTHON_BIN}|g" \
     -e "s|__DAEMON_PATH__|${DAEMON_PY}|g" \
-    -e "s|__REPO_DIR__|${SCRIPT_DIR}|g" \
+    -e "s|__REPO_DIR__|${REPO_ROOT}|g" \
     -e "s|__LOG_OUT__|${LOG_OUT}|g" \
     -e "s|__LOG_ERR__|${LOG_ERR}|g" \
     -e "s|__HOME__|${HOME}|g" \

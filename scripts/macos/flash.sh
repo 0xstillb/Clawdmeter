@@ -1,13 +1,14 @@
 #!/bin/bash
 # Build and flash Clawdmeter firmware on macOS.
 # Usage:
-#   ./flash-mac.sh <board>                       # auto-detect /dev/cu.usbmodem*
-#   ./flash-mac.sh <board> /dev/cu.usbmodem1101  # explicit USB serial port
+#   ./scripts/macos/flash.sh <board>                       # auto-detect /dev/cu.usbmodem*
+#   ./scripts/macos/flash.sh <board> /dev/cu.usbmodem1101  # explicit USB serial port
 #
 # <board> is the PlatformIO env name, e.g. waveshare_amoled_216 or waveshare_amoled_18.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BOARD="$1"
 PORT="$2"
 
@@ -15,7 +16,7 @@ if [ -z "$BOARD" ]; then
     echo "Error: board env name is required."
     echo "Usage: $0 <board> [port]"
     echo "Available boards:"
-    grep -E '^\[env:' "$SCRIPT_DIR/firmware/platformio.ini" | sed 's/\[env:/  /;s/\]//'
+    grep -E '^\[env:' "$REPO_ROOT/firmware/platformio.ini" | sed 's/\[env:/  /;s/\]//'
     exit 1
 fi
 
@@ -38,7 +39,7 @@ echo "Board: $BOARD"
 echo "Port:  $PORT"
 echo ""
 
-cd "$SCRIPT_DIR/firmware"
+cd "$REPO_ROOT/firmware"
 pio run -e "$BOARD" -t upload --upload-port "$PORT"
 
 echo ""

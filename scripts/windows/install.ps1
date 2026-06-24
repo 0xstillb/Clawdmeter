@@ -1,14 +1,14 @@
-# install-windows.ps1 - Clawdmeter Windows turnkey bootstrap (D-09)
+# scripts/windows/install.ps1 - Clawdmeter Windows turnkey bootstrap (D-09)
 #
 # Creates a Python virtual environment, installs dependencies from
 # daemon\requirements-windows.txt, registers the tray app to launch at login
 # (HKCU\...\Run, no admin required), and starts the tray app immediately.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File install-windows.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 #
 # Or, if you have already set a permissive execution policy:
-#   .\install-windows.ps1
+#   .\scripts\windows\install.ps1
 #
 # To disable autostart later: right-click the tray icon -> uncheck "Start at login"
 # Or remove manually: reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
@@ -26,9 +26,10 @@ function Log {
     Write-Host "[$ts] $Msg"
 }
 
-$RepoRoot = $PSScriptRoot
-if (-not $RepoRoot) {
-    $RepoRoot = (Get-Location).Path
+$RepoRoot = if ($PSScriptRoot) {
+    Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+} else {
+    (Get-Location).Path
 }
 
 Log "=== Clawdmeter Windows Install ==="
@@ -55,7 +56,7 @@ there, e.g.
 
   Copy-Item -Recurse '$RepoRoot' "$env:USERPROFILE\Clawdmeter"
   cd "$env:USERPROFILE\Clawdmeter"
-  powershell -ExecutionPolicy Bypass -File install-windows.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 "@
 }
 

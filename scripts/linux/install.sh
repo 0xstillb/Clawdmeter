@@ -2,8 +2,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SERVICE_NAME="claude-usage-daemon"
-SERVICE_FILE="$SCRIPT_DIR/daemon/$SERVICE_NAME.service"
+SERVICE_FILE="$REPO_ROOT/daemon/$SERVICE_NAME.service"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
 
 echo "=== Claude Usage Tracker - Install ==="
@@ -20,7 +21,7 @@ echo ""
 # Install systemd user service with resolved path
 echo "[2/3] Installing systemd user service..."
 mkdir -p "$USER_SERVICE_DIR"
-DAEMON_BIN="$SCRIPT_DIR/daemon/$SERVICE_NAME.sh"
+DAEMON_BIN="$REPO_ROOT/daemon/$SERVICE_NAME.sh"
 sed "s|DAEMON_PATH|${DAEMON_BIN}|g" "$SERVICE_FILE" > "$USER_SERVICE_DIR/$SERVICE_NAME.service"
 systemctl --user daemon-reload
 

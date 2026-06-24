@@ -84,7 +84,7 @@ Optional:
    messages — every reference port logs OK / failure for display, touch,
    PMU, IMU during `setup()`.
 
-7. **Visual QA.** `./screenshot.sh out.png` over USB serial captures
+7. **Visual QA.** `./scripts/linux/screenshot.sh out.png` over USB serial captures
    the live framebuffer at the active resolution. The UI is responsive
    (see [hal-contract.md](hal-contract.md) for breakpoint details);
    most ports will look acceptable out of the box. If your screen size
