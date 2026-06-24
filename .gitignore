@@ -22,3 +22,6 @@ __pycache__/
 # Hermes Agent / codex temp files
 .codex-tmp/
 .hermes/
+
+# Compiled plugin binaries (cross-language)
+daemon/plugins/example-provider
