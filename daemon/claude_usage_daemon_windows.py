@@ -438,11 +438,15 @@ def _parse_opencode_go_html(html: str) -> dict | None:
         rollingUsage: $R[42]={"used":0.0,"limit":12.0,...}
         weeklyUsage:  $R[43]={"used":5.1,"limit":30.0,...}
         monthlyUsage: $R[44]={"used":5.0,"limit":60.0,...}
+
+    Newer builds instead embed compact percentage objects like::
+
+        rollingUsage:$R[35]={status:"ok",resetInSec:16437,usagePercent:8}
     """
     patterns = {
-        "rolling": r'rollingUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
-        "weekly": r'weeklyUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
-        "monthly": r'monthlyUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+        "rolling": r'rollingUsage:\s*(?:\$R\[\d+\]\s*=\s*)?(\{[^}]+\})',
+        "weekly": r'weeklyUsage:\s*(?:\$R\[\d+\]\s*=\s*)?(\{[^}]+\})',
+        "monthly": r'monthlyUsage:\s*(?:\$R\[\d+\]\s*=\s*)?(\{[^}]+\})',
     }
 
     result = {}

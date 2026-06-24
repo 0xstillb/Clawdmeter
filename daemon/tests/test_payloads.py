@@ -42,3 +42,24 @@ def test_build_opencode_go_payload_preserves_missing_reset_subtext() -> None:
     assert payload["top"]["subtext"] == "reset unavailable"
     assert payload["bottom"]["subtext"] == "reset unavailable"
     assert payload["st"] == "allowed"
+
+
+def test_build_opencode_go_payload_supports_dashboard_usage_percent_shape() -> None:
+    payload = build_opencode_go_payload(
+        {
+            "rolling": {"status": "ok", "resetInSec": 16437, "usagePercent": 8},
+            "weekly": {"status": "ok", "resetInSec": 380382, "usagePercent": 4},
+            "monthly": {"status": "ok", "resetInSec": 2554239, "usagePercent": 2},
+        },
+        now=0,
+    )
+
+    assert payload["s"] == 92
+    assert payload["w"] == 96
+    assert payload["top"]["pct"] == 92
+    assert payload["bottom"]["pct"] == 96
+    assert payload["top"]["has_reset"] is True
+    assert payload["bottom"]["has_reset"] is True
+    assert payload["sr"] == 274
+    assert payload["wr"] == 6340
+    assert payload["st"] == "m2"

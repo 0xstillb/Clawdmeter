@@ -127,9 +127,9 @@ def build_claude_usage_payload(headers: Mapping[str, str], *, now: float) -> dic
 def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict:
     """Build a BLE payload from OpenCode Go subscription usage data.
 
-    ``parsed`` must have keys ``rolling``, ``weekly``, ``monthly``, each a
-    dict with ``used`` (float) and ``limit`` (float).  Optional ``periodEnd``
-    (epoch seconds) for reset timing.
+    ``parsed`` must have keys ``rolling``, ``weekly``, ``monthly``. Each window
+    may be either the older ``{used, limit, periodEnd}`` shape or the newer
+    ``{usagePercent, resetInSec, status}`` shape emitted by the web dashboard.
 
     The firmware's two-card display maps:
       - **Top card** (``window_short``) → rolling 5-hour usage
@@ -141,17 +141,27 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     current_time = time.time() if now is None else now
 
     def _remaining_window_pct(u: dict) -> int:
+        if "usagePercent" in u:
+            return _remaining_pct(u.get("usagePercent"))
         lim = u.get("limit", 0) or 1
         used = u.get("used", 0) or 0
         used_pct = max(0, min(100, int(round(used / lim * 100))))
         return 100 - used_pct
 
     def _used_window_pct(u: dict) -> int:
+        if "usagePercent" in u:
+            return _int_pct(u.get("usagePercent"))
         lim = u.get("limit", 0) or 1
         used = u.get("used", 0) or 0
         return max(0, min(100, int(round(used / lim * 100))))
 
     def _reset_mins(u: dict) -> int:
+        if "resetInSec" in u:
+            try:
+                secs = float(u.get("resetInSec", 0))
+            except (TypeError, ValueError):
+                return 0
+            return int(round(secs / 60)) if secs > 0 else 0
         end = u.get("periodEnd")
         if end is None:
             return 0
@@ -163,11 +173,21 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
 
     rolling_pct = _remaining_window_pct(parsed.get("rolling", {}))
     rolling_reset = _reset_mins(parsed.get("rolling", {}))
-    rolling_has_reset = parsed.get("rolling", {}).get("periodEnd") is not None
+    rolling_window = parsed.get("rolling", {})
+    weekly_window = parsed.get("weekly", {})
+    monthly_window = parsed.get("monthly", {})
+
+    rolling_has_reset = (
+        rolling_window.get("periodEnd") is not None or
+        rolling_window.get("resetInSec") is not None
+    )
     weekly_pct = _remaining_window_pct(parsed.get("weekly", {}))
     weekly_reset = _reset_mins(parsed.get("weekly", {}))
-    weekly_has_reset = parsed.get("weekly", {}).get("periodEnd") is not None
-    monthly_pct = _used_window_pct(parsed.get("monthly", {}))
+    weekly_has_reset = (
+        weekly_window.get("periodEnd") is not None or
+        weekly_window.get("resetInSec") is not None
+    )
+    monthly_pct = _used_window_pct(monthly_window)
 
     status = f"m{monthly_pct}" if monthly_pct else "allowed"
 
