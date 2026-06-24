@@ -482,7 +482,7 @@ async def poll_opencode_go_api(creds: dict) -> dict | None:
 
     if resp.status_code == 401 or resp.status_code == 403:
         log(f"OpenCode Go: auth failed (HTTP {resp.status_code}) — cookie may be expired")
-        return None
+        raise AuthError(resp.status_code)
     if resp.status_code >= 400:
         log(f"OpenCode Go: HTTP {resp.status_code}: {resp.text[:200]}")
         return None
@@ -804,7 +804,12 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     if source == "codex":
                         payload = await poll_codex_api(source_data)
                     elif source == "go":
-                        payload = await poll_opencode_go_api(source_data)
+                        try:
+                            payload = await poll_opencode_go_api(source_data)
+                        except AuthError:
+                            if tray_state:
+                                tray_state.set_error("OpenCode Go cookie expired — right-click tray → Settings")
+                            payload = None
                     else:
                         try:
                             payload = await poll_api(source_data)
