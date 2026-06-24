@@ -68,6 +68,7 @@ class TrayState:
         # Populated by daemon main() at startup:
         self.loop = None        # asyncio running loop (for call_soon_threadsafe)
         self.stop_event = None  # asyncio.Event (the existing clean-shutdown hook)
+        self.refresh_callback = None  # callable that pokes the active session poll loop
 
     def set_connected(self, ts: float) -> None:
         """Called after write_payload returns True.  ts = time.time()."""
@@ -84,6 +85,16 @@ class TrayState:
         """Called on token-expired / API auth failure (D-01 Error = actionable only)."""
         self.state = "error"
         self.reason = why
+
+    def request_refresh(self) -> bool:
+        """Ask the active daemon session to poll immediately, if connected."""
+        if self.loop is None or self.refresh_callback is None:
+            return False
+        try:
+            self.loop.call_soon_threadsafe(self.refresh_callback)
+        except RuntimeError:
+            return False
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +137,12 @@ def _opencode_go_dialog(ts: object = None) -> None:
     cred_file = config_dir / "opencode-go-credentials.json"
 
     existing_wid = ""
+    existing_cookie = ""
     if cred_file.exists():
         try:
             data = json.loads(cred_file.read_text(encoding="utf-8"))
             existing_wid = data.get("workspace_id", "")
+            existing_cookie = data.get("auth_cookie", "")
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -156,6 +169,82 @@ def _opencode_go_dialog(ts: object = None) -> None:
     def _set_status(msg: str, color: str = "#cccccc") -> None:
         lbl_status.config(text=msg, fg=color)
         win.update_idletasks()
+
+    def _entry_clipboard_action(entry: "tk.Entry", action: str):
+        """Handle clipboard shortcuts explicitly for Tk entries on Windows."""
+        try:
+            if action == "paste":
+                text = win.clipboard_get()
+                if entry.selection_present():
+                    entry.delete("sel.first", "sel.last")
+                entry.insert(tk.INSERT, text)
+                return "break"
+            if action == "copy":
+                text = entry.selection_get()
+                win.clipboard_clear()
+                win.clipboard_append(text)
+                return "break"
+            if action == "cut":
+                text = entry.selection_get()
+                win.clipboard_clear()
+                win.clipboard_append(text)
+                entry.delete("sel.first", "sel.last")
+                return "break"
+            if action == "select_all":
+                entry.focus_set()
+                entry.selection_range(0, tk.END)
+                entry.icursor(tk.END)
+                return "break"
+        except tk.TclError:
+            return "break"
+        return None
+
+    def _show_entry_context_menu(entry: "tk.Entry", event) -> str:
+        menu = tk.Menu(win, tearoff=0, bg="#2d2d2d", fg="#ffffff",
+                       activebackground="#3a5fd7", activeforeground="#ffffff")
+        menu.add_command(
+            label="Cut",
+            command=lambda: _entry_clipboard_action(entry, "cut"),
+        )
+        menu.add_command(
+            label="Copy",
+            command=lambda: _entry_clipboard_action(entry, "copy"),
+        )
+        menu.add_command(
+            label="Paste",
+            command=lambda: _entry_clipboard_action(entry, "paste"),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Select All",
+            command=lambda: _entry_clipboard_action(entry, "select_all"),
+        )
+        entry.focus_set()
+        menu.tk_popup(event.x_root, event.y_root)
+        menu.grab_release()
+        return "break"
+
+    def _install_entry_shortcuts(entry: "tk.Entry") -> None:
+        entry.bind("<Control-v>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "paste"))
+        entry.bind("<Control-V>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "paste"))
+        entry.bind("<Shift-Insert>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "paste"))
+        entry.bind("<Control-c>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "copy"))
+        entry.bind("<Control-C>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "copy"))
+        entry.bind("<Control-x>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "cut"))
+        entry.bind("<Control-X>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "cut"))
+        entry.bind("<Control-a>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "select_all"))
+        entry.bind("<Control-A>",
+                   lambda e, w=entry: _entry_clipboard_action(w, "select_all"))
+        entry.bind("<Button-3>",
+                   lambda e, w=entry: _show_entry_context_menu(w, e))
 
     def _test_and_save() -> None:
         """Validate the cookie against the dashboard, then save."""
@@ -244,16 +333,11 @@ def _opencode_go_dialog(ts: object = None) -> None:
         from daemon.config import set_provider
         set_provider("go")
 
-        # Show success notification
+        # Kick an immediate repoll so the device doesn't wait for the next 60s tick.
         if ts is not None:
-            try:
-                ts.set_connected(time.time())
-                if hasattr(ts, "set_state"):
-                    ts.state = "connected"
-            except Exception:
-                pass
+            ts.request_refresh()
 
-        _set_status("✅ Saved! Provider set to OpenCode Go.", "#5a7aff")
+        _set_status("✅ Saved! Provider set to OpenCode Go. Refreshing now…", "#5a7aff")
         win.after(1200, win.destroy)
 
     # ── Widgets ────────────────────────────────────────
@@ -279,6 +363,7 @@ def _opencode_go_dialog(ts: object = None) -> None:
                          insertbackground="#ffffff", relief=tk.FLAT, bd=6)
     entry_wid.insert(0, existing_wid)
     entry_wid.pack(side=tk.LEFT, fill="x", expand=True)
+    _install_entry_shortcuts(entry_wid)
 
     # Auth Cookie — masked with show/hide toggle
     frm_cookie = tk.Frame(win, bg="#1e1e1e")
@@ -300,7 +385,9 @@ def _opencode_go_dialog(ts: object = None) -> None:
     entry_cookie = tk.Entry(cookie_frame, font=entry_font, bg="#2d2d2d", fg="#ffffff",
                             insertbackground="#ffffff", relief=tk.FLAT, bd=6,
                             show="*")
+    entry_cookie.insert(0, existing_cookie)
     entry_cookie.pack(side=tk.LEFT, fill="x", expand=True)
+    _install_entry_shortcuts(entry_cookie)
 
     btn_eye = tk.Button(cookie_frame, text="👁", command=_toggle_cookie_visibility,
                         bg="#2d2d2d", fg="#cccccc", relief=tk.FLAT,
@@ -336,7 +423,10 @@ def _opencode_go_dialog(ts: object = None) -> None:
     # Bind Enter key to save
     win.bind("<Return>", lambda _: _test_and_save())
 
-    entry_cookie.focus_set()
+    if existing_wid:
+        entry_cookie.focus_set()
+    else:
+        entry_wid.focus_set()
     win.mainloop()
 
 
@@ -459,6 +549,7 @@ def main() -> None:
     def _on_provider(provider_id: str) -> None:
         if set_provider(provider_id):
             daemon_log(f"Provider preference set: {provider_id}")
+            ts.request_refresh()
         else:
             ts.set_error("could not save provider preference")
         icon.update_menu()

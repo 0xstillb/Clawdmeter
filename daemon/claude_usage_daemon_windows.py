@@ -605,7 +605,7 @@ class Session:
         data = json.dumps(wire_payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
         try:
-            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=True)
             return True
         except (BleakError, OSError) as e:
             # WinRT can raise a raw OSError/WinError (NOT wrapped as BleakError)
@@ -785,6 +785,9 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     log("Connected")
     session = Session(client)
     await session.setup_refresh_subscription()
+    refresh_callback = session.refresh_requested.set
+    if tray_state is not None:
+        tray_state.refresh_callback = refresh_callback
 
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
@@ -856,6 +859,8 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             # being left frozen on stale data after Quit (SC#3 graceful shutdown).
             await _wait_first(session.refresh_requested, stop_event, timeout=TICK)
     finally:
+        if tray_state is not None and tray_state.refresh_callback is refresh_callback:
+            tray_state.refresh_callback = None
         # Clean GATT disconnect on the way out — this is what tells the peripheral
         # the link is gone. WinRT can surface a raw OSError (not BleakError) here,
         # so swallow both; the link tears down regardless once we exit.

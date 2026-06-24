@@ -148,7 +148,7 @@ async def poll() -> PluginResponse:
             "OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE "
             "env vars or create "
             "~/.config/clawdmeter/opencode-go-credentials.json",
-            retry=True,
+            retry=False,
         )
 
     wid = creds.get("workspace_id", "")
@@ -157,7 +157,7 @@ async def poll() -> PluginResponse:
         return PluginResponse.failure(
             "OpenCode Go credentials incomplete "
             "(missing workspace_id or auth_cookie)",
-            retry=True,
+            retry=False,
         )
 
     # ── repeated auth failure → stop retrying ─────────────────────────

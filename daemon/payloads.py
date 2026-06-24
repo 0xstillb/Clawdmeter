@@ -71,7 +71,9 @@ def build_provider_payload(*, provider: str, mode: str, top: dict, bottom: dict,
 
 def build_windowed_payload(*, provider: str, top_pct: int, top_reset_mins: int,
                            bottom_pct: int, bottom_reset_mins: int,
-                           status: str = "unknown", mode: str = "window") -> dict:
+                           status: str = "unknown", mode: str = "window",
+                           top_has_reset: bool = True, bottom_has_reset: bool = True,
+                           top_subtext: str | None = None, bottom_subtext: str | None = None) -> dict:
     return build_provider_payload(
         provider=provider,
         mode=mode,
@@ -80,14 +82,16 @@ def build_windowed_payload(*, provider: str, top_pct: int, top_reset_mins: int,
             "kind": "window_short",
             "pct": top_pct,
             "reset_mins": top_reset_mins,
-            "has_reset": True,
+            "has_reset": top_has_reset,
+            **({"subtext": top_subtext} if top_subtext else {}),
         },
         bottom={
             "label": "Weekly",
             "kind": "window_long",
             "pct": bottom_pct,
             "reset_mins": bottom_reset_mins,
-            "has_reset": True,
+            "has_reset": bottom_has_reset,
+            **({"subtext": bottom_subtext} if bottom_subtext else {}),
         },
         status=status,
         ok=True,
@@ -153,8 +157,10 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
 
     rolling_pct = _pct(parsed.get("rolling", {}))
     rolling_reset = _reset_mins(parsed.get("rolling", {}))
+    rolling_has_reset = parsed.get("rolling", {}).get("periodEnd") is not None
     weekly_pct = _pct(parsed.get("weekly", {}))
     weekly_reset = _reset_mins(parsed.get("weekly", {}))
+    weekly_has_reset = parsed.get("weekly", {}).get("periodEnd") is not None
     monthly_pct = _pct(parsed.get("monthly", {}))
 
     status = f"m{monthly_pct}" if monthly_pct else "allowed"
@@ -166,6 +172,10 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
         bottom_pct=weekly_pct,
         bottom_reset_mins=weekly_reset,
         status=status,
+        top_has_reset=rolling_has_reset,
+        bottom_has_reset=weekly_has_reset,
+        top_subtext=None if rolling_has_reset else "reset unavailable",
+        bottom_subtext=None if weekly_has_reset else "reset unavailable",
     )
 
 

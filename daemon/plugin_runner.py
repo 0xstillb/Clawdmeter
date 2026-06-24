@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,20 @@ class PluginCrashedError(Exception):
 def _is_executable(path: Path) -> bool:
     """Return True if *path* is a regular file with at least one execute bit set."""
     try:
-        return path.is_file() and bool(path.stat().st_mode & stat.S_IXUSR)
+        if not path.is_file():
+            return False
+        if os.name == "nt":
+            suffix = path.suffix.lower()
+            if suffix in {".exe", ".bat", ".cmd", ".com", ".ps1", ".py", ".pyw"}:
+                return True
+            if suffix == "":
+                try:
+                    first_line = path.open("r", encoding="utf-8", errors="ignore").readline()
+                except OSError:
+                    return False
+                return first_line.startswith("#!")
+            return False
+        return bool(path.stat().st_mode & stat.S_IXUSR)
     except OSError:
         return False
 
@@ -39,6 +53,37 @@ def _is_executable(path: Path) -> bool:
 def _plugin_name(path: Path) -> str:
     """Return the stem (filename without extension) as the plugin identifier."""
     return path.stem
+
+
+def _preferred_python(path: Path) -> str:
+    """Return the best Python interpreter for plugin subprocesses."""
+    override = os.environ.get("CLAWDMETER_PYTHON", "").strip()
+    if override:
+        return override
+
+    repo_python = path.resolve().parent.parent.parent / ".venv" / "Scripts" / "python.exe"
+    if os.name == "nt" and repo_python.is_file():
+        return str(repo_python)
+
+    return sys.executable
+
+
+def _plugin_command(path: Path) -> list[str]:
+    """Return the subprocess command used to launch *path* on this platform."""
+    if os.name == "nt":
+        suffix = path.suffix.lower()
+        if suffix in {".py", ".pyw"} or suffix == "":
+            return [_preferred_python(path), str(path)]
+        if suffix == ".ps1":
+            return [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(path),
+            ]
+    return [str(path)]
 
 
 class PluginRunner:
@@ -142,9 +187,11 @@ class PluginRunner:
         }
 
         try:
+            cmd = _plugin_command(path)
+            if log.isEnabledFor(logging.DEBUG):
+                cmd.append("--debug")
             proc = await asyncio.create_subprocess_exec(
-                str(path),
-                "--debug" if log.isEnabledFor(logging.DEBUG) else "",
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

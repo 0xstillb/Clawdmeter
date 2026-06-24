@@ -132,7 +132,7 @@ static lv_image_dsc_t battery_dscs[5];
 static uint16_t brand_canvas_buf[54 * 54];
 static uint16_t ble_canvas_buf[14 * 16];
 static uint16_t pair_ble_canvas_buf[26 * 42];
-static uint16_t idle_canvas_buf[20 * 20];
+static uint8_t idle_canvas_buf[20 * 20 * 3];  // RGB565A8: 2 bytes RGB + 1 byte alpha per pixel
 static uint16_t agent_canvas_buf[28 * 28];
 static uint16_t flow_canvas_buf[420 * 5];
 static lv_obj_t* usage_container = nullptr;
@@ -196,6 +196,7 @@ static uint32_t s_last_screen_change = 0;
 static bool s_ble_connected = false;
 static bool data_received = false;
 static int view_state = -1;  // 0 pair, 1 idle, 2 usage
+static int forced_view_override = -1;
 static uint32_t last_data_ms = 0;
 static const uint32_t DATA_FRESH_MS = 120000;
 static UsageData current_usage = {};
@@ -216,8 +217,12 @@ static uint32_t card_glow_ms = 0;
 static bool idle_cursor_on = true;
 static lv_obj_t* idle_glow_obj = nullptr;
 static lv_obj_t* pair_scan_ring = nullptr;
+static lv_obj_t* pair_scan_rings[3] = {nullptr, nullptr, nullptr};
 static int pair_scan_phase = 0;
 static uint8_t card_glow_phase = 0;
+static int16_t idle_glow_w = 0;
+static int16_t idle_glow_h = 0;
+static int16_t pair_scan_base = 0;
 
 static void compute_layout(const BoardCaps& c) {
     memset(&L, 0, sizeof(L));
@@ -234,58 +239,58 @@ static void compute_layout(const BoardCaps& c) {
         L.chip_h = 58;
         L.chip_radius = 14;
         L.title_x = 72;
-        L.title_y = 10;
-        L.title_w = 166;
-        L.provider_y = 35;
-        L.bt_x = 268;
+        L.title_y = 8;
+        L.title_w = 160;
+        L.provider_y = 38;
+        L.bt_x = 266;
         L.bt_y = 18;
         L.agent_size = 22;
-        L.agent_x = 288;
+        L.agent_x = 286;
         L.agent_y = 16;
-        L.battery_x = 236;
+        L.battery_x = 230;
         L.battery_y = 12;
         L.flow_x = 10;
-        L.flow_y = 68;
+        L.flow_y = 66;
         L.flow_w = 300;
         L.flow_h = 2;
         L.flow_dot = 4;
         L.card_x = 10;
         L.card2_x = L.card_x;
         L.card_w = 300;
-        L.card_h = 77;
-        L.card1_y = 74;
-        L.card2_y = 157;
+        L.card_h = 80;
+        L.card1_y = 72;
+        L.card2_y = 154;
         L.card_radius = 12;
         L.card_pad_l = 10;
         L.card_pad_r = 10;
         L.card_pad_t = 6;
         L.card_pad_b = 5;
         L.kicker_y = 0;
-        L.pct_y = 14;
-        L.pill_y = 2;
-        L.bar_y = 41;
+        L.pct_y = 10;
+        L.pill_y = 3;
+        L.bar_y = 43;
         L.bar_h = 9;
-        L.meta_y = 55;
+        L.meta_y = 58;
         L.meta_dot = 6;
         L.meta_right_w = 78;
         L.pair_hero_x = 22;
         L.pair_hero_y = 98;
         L.pair_hero_size = 90;
-        L.pair_steps_x = 138;
+        L.pair_steps_x = 136;
         L.pair_steps_y = 100;
         L.pair_step_w = 148;
-        L.pair_step_h = 20;
+        L.pair_step_h = 21;
         L.pair_step_gap = 6;
         L.idle_creature_size = 140;
         L.idle_creature_dy = -6;
-        L.idle_label_y = -6;
+        L.idle_label_y = -8;
         L.show_kicker = false;
         L.pair_row = true;
-        L.title_font = &font_ui_bold_26;
+        L.title_font = &font_ui_bold_24;
         L.provider_font = &font_ui_bold_9;
         L.chip_font = &font_ui_bold_24;
         L.kicker_font = &font_ui_bold_10;
-        L.metric_font = &font_ui_bold_26;
+        L.metric_font = &font_ui_bold_24;
         L.pill_font = &font_ui_bold_10;
         L.meta_font = &font_ui_9;
         L.pair_font = &font_ui_bold_11;
@@ -587,14 +592,21 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
 }
 
 static void render_hermes_idle_icon(uint8_t phase) {
-    const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
     const uint8_t dim = 190 + (phase < 24 ? phase : 48 - phase);
     const uint16_t body = make_rgb565((0xec * dim) / 214, (0xe6 * dim) / 214, (0xdb * dim) / 214);
     const uint16_t shade = make_rgb565((0xde * dim) / 214, (0xda * dim) / 214, (0xd0 * dim) / 214);
 
+    uint16_t* rgb = reinterpret_cast<uint16_t*>(idle_canvas_buf);
+    uint8_t* alpha = idle_canvas_buf + 20 * 20 * 2;
     for (int i = 0; i < 20 * 20; ++i) {
-        char code = HERMES_HEADER_FRAME[i];
-        idle_canvas_buf[i] = (code == '0') ? bg : (code == '2' ? shade : body);
+        const char code = HERMES_HEADER_FRAME[i];
+        if (code == '0') {
+            rgb[i] = 0;          // RGB value doesn't matter when alpha=0
+            alpha[i] = 0;        // fully transparent
+        } else {
+            rgb[i] = (code == '2') ? shade : body;
+            alpha[i] = 255;      // fully opaque
+        }
     }
 
     if (idle_canvas) lv_obj_invalidate(idle_canvas);
@@ -633,11 +645,9 @@ static void render_ble_icon(void) {
     const uint16_t blue = make_rgb565(0x5a, 0x7a, 0xff);
     for (int i = 0; i < 14 * 16; ++i) ble_canvas_buf[i] = bg;
 
-    draw_line_thick_565(ble_canvas_buf, 14, 16, 7, 0, 7, 15, blue, 2);
-    draw_line_thick_565(ble_canvas_buf, 14, 16, 4, 4, 10, 10, blue, 2);
-    draw_line_thick_565(ble_canvas_buf, 14, 16, 10, 4, 4, 10, blue, 2);
-    draw_line_thick_565(ble_canvas_buf, 14, 16, 5, 5, 8, 8, blue, 2);
-    draw_line_thick_565(ble_canvas_buf, 14, 16, 8, 8, 5, 11, blue, 2);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 7, 0, 7, 15, blue, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 3, 4, 10, 10, blue, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 10, 4, 3, 10, blue, 1);
 }
 
 static void render_pair_ble_icon(void) {
@@ -652,8 +662,10 @@ static void render_pair_ble_icon(void) {
 
 static void render_agent_badge_icon(bool connected) {
     const int size = L.agent_size > 0 ? L.agent_size : 22;
-    const uint16_t bg = make_rgb565(connected ? 0x0a : 0x20, connected ? 0x18 : 0x12, connected ? 0x10 : 0x0d);
-    const uint16_t fg = make_rgb565(connected ? 0x34 : 0xff, connected ? 0xb5 : 0xaa, connected ? 0x5a : 0x77);
+    const uint16_t screen_bg = make_rgb565(0x0d, 0x10, 0x16);
+    const uint16_t accent = make_rgb565(connected ? 0x34 : 0xff, connected ? 0xb5 : 0xaa, connected ? 0x5a : 0x77);
+    const uint16_t bg = blend_rgb565(screen_bg, accent, connected ? 31 : 38);
+    const uint16_t fg = accent;
 
     for (int i = 0; i < size * size; ++i) agent_canvas_buf[i] = bg;
 
@@ -670,13 +682,13 @@ static void render_agent_badge_icon(bool connected) {
     draw_rect_565(agent_canvas_buf, size, size, right, top, dot, dot, fg);
     draw_rect_565(agent_canvas_buf, size, size, mid_x, bottom, dot, dot, fg);
 
-    draw_line_thick_565(agent_canvas_buf, size, size, left + dot - 1, top + 2, right, top + 2, fg, 2);
-    draw_line_thick_565(agent_canvas_buf, size, size, left + dot - 1, top + dot, mid_x + 1, bottom, fg, 2);
-    draw_line_thick_565(agent_canvas_buf, size, size, right, top + dot, mid_x + dot - 1, bottom, fg, 2);
-    draw_line_thick_565(agent_canvas_buf, size, size, left + 1, mid_y, right - 1, mid_y, fg, 2);
+    draw_line_thick_565(agent_canvas_buf, size, size, left + dot - 1, top + 2, right, top + 2, fg, 1);
+    draw_line_thick_565(agent_canvas_buf, size, size, left + dot - 1, top + dot, mid_x + 1, bottom, fg, 1);
+    draw_line_thick_565(agent_canvas_buf, size, size, right, top + dot, mid_x + dot - 1, bottom, fg, 1);
+    draw_line_thick_565(agent_canvas_buf, size, size, left + 1, mid_y, right - 1, mid_y, fg, 1);
 
     if (!connected) {
-        draw_line_thick_565(agent_canvas_buf, size, size, size / 2 + 1, 3, size / 2 - 2, size - 4, fg, 2);
+        draw_line_thick_565(agent_canvas_buf, size, size, size / 2 + 1, 3, size / 2 - 2, size - 4, fg, 1);
     }
 
     if (agent_canvas) lv_obj_invalidate(agent_canvas);
@@ -687,22 +699,22 @@ static void render_flow_line(uint8_t phase) {
 
     const int w = L.flow_w;
     const int h = L.flow_h;
-    const uint16_t base = make_rgb565(0x22, 0x26, 0x2e);
-    const uint16_t edge = make_rgb565(0x32, 0x36, 0x3f);
-    const uint16_t glow = make_rgb565(0x5a, 0x7a, 0xff);
+    const uint16_t base = make_rgb565(0x1f, 0x24, 0x2c);
+    const uint16_t edge = make_rgb565(0x2b, 0x31, 0x3b);
+    const uint16_t glow = make_rgb565(0x72, 0x95, 0xff);
 
-    const int center = (int)(((int32_t)(w + L.flow_dot / 2) * phase) / 39);
-    const int radius = (w * 34) / 100;
+    const int radius = (w * 26) / 100;
+    const int travel = w + radius * 2;
+    const int center = -radius + (int)(((int32_t)travel * phase) / 47);
 
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const int dist = abs(x - center);
-            uint16_t color = edge;
+            uint16_t color = blend_rgb565(base, edge, 90);
             if (dist < radius) {
-                const uint8_t a = (uint8_t)(255 - (dist * 255) / radius);
-                color = blend_rgb565(base, glow, a);
-            } else {
-                color = base;
+                const uint32_t t = 255u - (uint32_t)(dist * 255) / (uint32_t)radius;
+                const uint8_t a = (uint8_t)((t * t) / 255u);  // softer falloff near the tail
+                color = blend_rgb565(color, glow, a);
             }
             flow_canvas_buf[y * w + x] = color;
         }
@@ -717,7 +729,7 @@ static const char* provider_text(UsageProvider provider) {
         case USAGE_PROVIDER_CODEX: return "CODEX";
         case USAGE_PROVIDER_OPENROUTER: return "OPENROUTER";
         case USAGE_PROVIDER_ZEN: return "ZEN";
-        case USAGE_PROVIDER_GO: return "GO";
+        case USAGE_PROVIDER_GO: return "OPENCODE GO";
         default: return "NO DATA";
     }
 }
@@ -909,6 +921,8 @@ static void style_pill(lv_obj_t* pill, lv_color_t accent) {
 static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t** fill_out) {
     lv_obj_t* bar = lv_obj_create(parent);
     const bool secondary = lv_color_eq(accent, COL_YELLOW);
+    const lv_color_t fill_start = secondary ? lv_color_hex(0xd0a12b) : lv_color_hex(0x3658cb);
+    const lv_color_t fill_end = secondary ? lv_color_hex(0xf4dc86) : lv_color_hex(0x7e9fff);
     lv_obj_set_pos(bar, 0, y);
     lv_obj_set_size(bar, L.card_w - L.card_pad_l - L.card_pad_r, L.bar_h);
     lv_obj_set_style_bg_color(bar, COL_TRACK, 0);
@@ -923,9 +937,9 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t**
     lv_obj_t* fill = lv_obj_create(bar);
     lv_obj_set_pos(fill, 0, 0);
     lv_obj_set_size(fill, 0, L.bar_h);
-    lv_obj_set_style_bg_color(fill, secondary ? lv_color_hex(0xd5b83a) : lv_color_hex(0x3a5fd7), 0);
+    lv_obj_set_style_bg_color(fill, fill_start, 0);
     lv_obj_set_style_bg_opa(fill, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_grad_color(fill, accent, 0);
+    lv_obj_set_style_bg_grad_color(fill, fill_end, 0);
     lv_obj_set_style_bg_grad_dir(fill, LV_GRAD_DIR_HOR, 0);
     lv_obj_set_style_border_width(fill, 0, 0);
     lv_obj_set_style_radius(fill, LV_RADIUS_CIRCLE, 0);
@@ -1056,38 +1070,31 @@ static void build_pair_group(lv_obj_t* parent) {
     pair_group = make_transparent_box(parent, 0, 0, L.scr_w, L.scr_h);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    lv_obj_t* ring_outer = lv_obj_create(pair_group);
-    pair_scan_ring = ring_outer;
-    lv_obj_set_pos(ring_outer, L.pair_hero_x, L.pair_hero_y);
-    lv_obj_set_size(ring_outer, L.pair_hero_size, L.pair_hero_size);
-    lv_obj_set_style_bg_opa(ring_outer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ring_outer, 1, 0);
-    lv_obj_set_style_border_color(ring_outer, COL_BLUE, 0);
-    lv_obj_set_style_border_opa(ring_outer, LV_OPA_70, 0);
-    lv_obj_set_style_radius(ring_outer, LV_RADIUS_CIRCLE, 0);
-    lv_obj_clear_flag(ring_outer, LV_OBJ_FLAG_SCROLLABLE);
+    pair_scan_ring = lv_obj_create(pair_group);
+    lv_obj_set_pos(pair_scan_ring, L.pair_hero_x, L.pair_hero_y);
+    lv_obj_set_size(pair_scan_ring, L.pair_hero_size, L.pair_hero_size);
+    lv_obj_set_style_bg_opa(pair_scan_ring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(pair_scan_ring, 0, 0);
+    lv_obj_set_style_pad_all(pair_scan_ring, 0, 0);
+    lv_obj_set_style_radius(pair_scan_ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_clear_flag(pair_scan_ring, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* ring_mid = lv_obj_create(ring_outer);
-    lv_obj_set_size(ring_mid, L.pair_hero_size - 18, L.pair_hero_size - 18);
-    lv_obj_center(ring_mid);
-    lv_obj_set_style_bg_opa(ring_mid, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ring_mid, 1, 0);
-    lv_obj_set_style_border_color(ring_mid, COL_BLUE, 0);
-    lv_obj_set_style_border_opa(ring_mid, LV_OPA_50, 0);
-    lv_obj_set_style_radius(ring_mid, LV_RADIUS_CIRCLE, 0);
-    lv_obj_clear_flag(ring_mid, LV_OBJ_FLAG_SCROLLABLE);
+    pair_scan_base = L.pair_hero_size - 12;
+    for (int i = 0; i < 3; ++i) {
+        pair_scan_rings[i] = lv_obj_create(pair_group);
+        lv_obj_set_size(pair_scan_rings[i], pair_scan_base, pair_scan_base);
+        lv_obj_set_style_bg_opa(pair_scan_rings[i], LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(pair_scan_rings[i], 2, 0);
+        lv_obj_set_style_border_color(pair_scan_rings[i], COL_BLUE, 0);
+        lv_obj_set_style_border_opa(pair_scan_rings[i], (lv_opa_t)140, 0);
+        lv_obj_set_style_radius(pair_scan_rings[i], LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_pad_all(pair_scan_rings[i], 0, 0);
+        lv_obj_clear_flag(pair_scan_rings[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_center(pair_scan_rings[i]);
+        lv_obj_align_to(pair_scan_rings[i], pair_scan_ring, LV_ALIGN_CENTER, 0, 0);
+    }
 
-    lv_obj_t* ring_inner = lv_obj_create(ring_outer);
-    lv_obj_set_size(ring_inner, L.pair_hero_size - 36, L.pair_hero_size - 36);
-    lv_obj_center(ring_inner);
-    lv_obj_set_style_bg_opa(ring_inner, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ring_inner, 1, 0);
-    lv_obj_set_style_border_color(ring_inner, COL_PANEL_EDGE, 0);
-    lv_obj_set_style_border_opa(ring_inner, LV_OPA_40, 0);
-    lv_obj_set_style_radius(ring_inner, LV_RADIUS_CIRCLE, 0);
-    lv_obj_clear_flag(ring_inner, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* bt = lv_canvas_create(ring_outer);
+    lv_obj_t* bt = lv_canvas_create(pair_scan_ring);
     lv_canvas_set_buffer(bt, pair_ble_canvas_buf, 26, 42, LV_COLOR_FORMAT_RGB565);
     lv_obj_set_style_bg_opa(bt, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bt, 0, 0);
@@ -1110,17 +1117,22 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     idle_glow_obj = lv_obj_create(idle_group);
-    lv_obj_set_size(idle_glow_obj, L.idle_creature_size + 40, L.idle_creature_size + 40);
+    idle_glow_w = L.idle_creature_size + 20;
+    idle_glow_h = L.idle_creature_size + 32;
+    lv_obj_set_size(idle_glow_obj, idle_glow_w, idle_glow_h);
     lv_obj_set_style_bg_color(idle_glow_obj, COL_BLUE, 0);
-    lv_obj_set_style_bg_opa(idle_glow_obj, LV_OPA_10, 0);
+    lv_obj_set_style_bg_opa(idle_glow_obj, (lv_opa_t)10, 0);
     lv_obj_set_style_border_width(idle_glow_obj, 1, 0);
     lv_obj_set_style_border_color(idle_glow_obj, COL_BLUE, 0);
-    lv_obj_set_style_border_opa(idle_glow_obj, LV_OPA_20, 0);
-    lv_obj_set_style_radius(idle_glow_obj, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_opa(idle_glow_obj, (lv_opa_t)15, 0);
+    lv_obj_set_style_shadow_width(idle_glow_obj, 18, 0);
+    lv_obj_set_style_shadow_color(idle_glow_obj, COL_BLUE, 0);
+    lv_obj_set_style_shadow_opa(idle_glow_obj, (lv_opa_t)10, 0);
+    lv_obj_set_style_radius(idle_glow_obj, 20, 0);
     lv_obj_clear_flag(idle_glow_obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(idle_glow_obj, LV_ALIGN_CENTER, 0, L.idle_creature_dy);
     idle_canvas = lv_canvas_create(idle_group);
-    lv_canvas_set_buffer(idle_canvas, idle_canvas_buf, 20, 20, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_set_buffer(idle_canvas, idle_canvas_buf, 20, 20, LV_COLOR_FORMAT_RGB565A8);
     idle_base_scale = (uint32_t)((L.idle_creature_size * 256) / 20);
     lv_image_set_scale(idle_canvas, idle_base_scale);
     lv_image_set_antialias(idle_canvas, false);
@@ -1192,18 +1204,10 @@ static void apply_battery_visibility(void) {
     }
 }
 
-static void update_view_state(void) {
-    const uint32_t now = lv_tick_get();
-    int next = 0;
-    if (!s_ble_connected) {
-        next = 0;
-    } else {
-        next = 2;  // Usage — data freshness tracked by idle auto-switch timer
-    }
-
-    view_state = next;
-    update_header_title_for_view(next);
-    if (next == 2) {
+static void apply_view_state(int view) {
+    view_state = view;
+    update_header_title_for_view(view);
+    if (view == 2) {
         lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
@@ -1211,7 +1215,7 @@ static void update_view_state(void) {
         lv_obj_clear_flag(flow_track, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(flow_canvas, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(flow_dot, LV_OBJ_FLAG_HIDDEN);
-    } else if (next == 1) {
+    } else if (view == 1) {
         lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
@@ -1231,6 +1235,28 @@ static void update_view_state(void) {
 
     apply_battery_visibility();
     update_header_connection_state();
+}
+
+static void update_view_state(void) {
+    if (current_screen != SCREEN_USAGE) return;
+    const uint32_t now = lv_tick_get();
+    int next = 0;
+    if (!s_ble_connected) {
+        next = 0;  // Pair
+    } else if (data_received && (now - last_data_ms) < DATA_FRESH_MS) {
+        next = 2;  // Usage — data is fresh
+    } else {
+        next = 1;  // Idle — data stale or never received
+    }
+
+    if (!s_ble_connected) {
+        forced_view_override = -1;
+    } else if (forced_view_override >= 0) {
+        next = forced_view_override;
+    }
+
+    if (next == view_state) return;
+    apply_view_state(next);
 }
 
 static void global_click_cb(lv_event_t* e) {
@@ -1309,8 +1335,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_border_color(lbl_provider, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_border_opa(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)26 : LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl_provider, 3, 0);
-    lv_obj_set_style_pad_left(lbl_provider, 1, 0);
-    lv_obj_set_style_pad_right(lbl_provider, 5, 0);
+    lv_obj_set_style_pad_left(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? 4 : 1, 0);
+    lv_obj_set_style_pad_right(lbl_provider, L.mode == LAYOUT_LANDSCAPE_SMALL ? 4 : 5, 0);
     lv_obj_set_style_pad_top(lbl_provider, 1, 0);
     lv_obj_set_style_pad_bottom(lbl_provider, 1, 0);
     lv_obj_set_pos(lbl_provider, L.title_x, L.provider_y);
@@ -1422,31 +1448,16 @@ void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
 
-    // Auto-idle: if on Usage (view=2) with stale data for > DATA_FRESH_MS,
-    // switch to Idle (view=1)
-    if (view_state == 2 && data_received &&
-        (lv_tick_get() - last_data_ms) > DATA_FRESH_MS) {
-        // Force Idle
-        view_state = 1;
-        update_header_title_for_view(1);
-        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(header_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(flow_track, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(flow_canvas, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(flow_dot, LV_OBJ_FLAG_HIDDEN);
-        apply_battery_visibility();
-        update_header_connection_state();
-    }
-
     const uint32_t now = lv_tick_get();
     if ((view_state == 2 || view_state == 0) && now - flow_anim_ms >= 35) {
         flow_anim_ms = now;
-        flow_anim_phase = (uint8_t)((flow_anim_phase + 1) % 40);
-        const int tri = flow_anim_phase <= 20 ? flow_anim_phase : 40 - flow_anim_phase;
+        flow_anim_phase = (uint8_t)((flow_anim_phase + 1) % 48);
+        const int tri = flow_anim_phase <= 24 ? flow_anim_phase : 48 - flow_anim_phase;
         render_flow_line(flow_anim_phase);
-        if (flow_dot) lv_obj_set_style_opa(flow_dot, (lv_opa_t)(112 + (143 * tri) / 20), 0);
+        if (flow_dot) {
+            lv_obj_set_pos(flow_dot, L.flow_x + L.flow_w, L.flow_y - 1);
+            lv_obj_set_style_opa(flow_dot, (lv_opa_t)(92 + (163 * tri) / 24), 0);
+        }
     }
 
     if ((view_state == 2 || view_state == 0) && now - header_anim_ms >= (view_state == 2 ? 130 : 500)) {
@@ -1506,10 +1517,15 @@ void ui_tick_anim(void) {
         if (now - idle_glow_ms >= 522) {
             idle_glow_ms = now;
             idle_glow_phase = (uint8_t)((idle_glow_phase + 1) % 48);
-            const uint32_t gf = 55u + (45u * SINE_48[idle_glow_phase]) / 255u;  // 55%–100%
+            const uint32_t gf = SINE_48[idle_glow_phase];
             if (idle_glow_obj) {
-                lv_obj_set_style_bg_opa(idle_glow_obj, (lv_opa_t)(gf * 25u / 100u), 0);
-                lv_obj_set_style_border_opa(idle_glow_obj, (lv_opa_t)(gf * 51u / 100u), 0);
+                const int16_t w = idle_glow_w + (int16_t)((idle_glow_w * 4 / 100) * gf / 255u);
+                const int16_t h = idle_glow_h + (int16_t)((idle_glow_h * 4 / 100) * gf / 255u);
+                lv_obj_set_size(idle_glow_obj, w, h);
+                lv_obj_align(idle_glow_obj, LV_ALIGN_CENTER, 0, L.idle_creature_dy);
+                lv_obj_set_style_bg_opa(idle_glow_obj, (lv_opa_t)(10 + (15 * gf) / 255u), 0);
+                lv_obj_set_style_border_opa(idle_glow_obj, (lv_opa_t)(8 + (7 * gf) / 255u), 0);
+                lv_obj_set_style_shadow_opa(idle_glow_obj, (lv_opa_t)(8 + (12 * gf) / 255u), 0);
             }
         }
 
@@ -1521,11 +1537,24 @@ void ui_tick_anim(void) {
     }
 
     if (view_state == 0 && pair_scan_ring) {
-        if (now - pair_scan_ms >= 40) {
+        if (now - pair_scan_ms >= 33) {
             pair_scan_ms = now;
-            pair_scan_phase = (pair_scan_phase + 1) % 18;
-            int bw = 1 + ((pair_scan_phase <= 9 ? pair_scan_phase : 18 - pair_scan_phase) / 5);
-            lv_obj_set_style_border_width(pair_scan_ring, bw, 0);
+            pair_scan_phase = (pair_scan_phase + 1) % 75;
+            static const int offsets[3] = {0, 24, 48};
+            for (int i = 0; i < 3; ++i) {
+                lv_obj_t* ring = pair_scan_rings[i];
+                if (!ring) continue;
+                const int local = (pair_scan_phase + offsets[i]) % 75;
+                const uint32_t p = (uint32_t)local * 255u / 74u;
+                const uint32_t ease = 255u - ((255u - p) * (255u - p) / 255u);  // ease-out
+                const int16_t size = (int16_t)(pair_scan_base * (35u + (135u * ease) / 255u) / 100u);
+                const lv_opa_t opa = (lv_opa_t)(180u - (180u * ease) / 255u);
+                const uint8_t bw = (uint8_t)(2u + (ease < 96u ? 1u : 0u));
+                lv_obj_set_size(ring, size, size);
+                lv_obj_align_to(ring, pair_scan_ring, LV_ALIGN_CENTER, 0, 0);
+                lv_obj_set_style_border_width(ring, bw, 0);
+                lv_obj_set_style_border_opa(ring, opa, 0);
+            }
         }
     }
 }
@@ -1534,6 +1563,7 @@ void ui_show_screen(screen_t screen) {
     current_screen = screen;
     s_last_screen_change = lv_tick_get();
     if (screen == SCREEN_SPLASH) {
+        forced_view_override = -1;
         if (!splash_get_root()) {
             current_screen = SCREEN_USAGE;
             splash_hide();
@@ -1570,34 +1600,8 @@ uint32_t ui_get_last_screen_change_time(void) {
 void ui_force_view(int view) {
     if (view < 0 || view > 2) return;
     if (current_screen != SCREEN_USAGE) return;
-    view_state = view;
-    update_header_title_for_view(view);
-    if (view == 2) {
-        lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(header_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(flow_track, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(flow_canvas, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(flow_dot, LV_OBJ_FLAG_HIDDEN);
-    } else if (view == 1) {
-        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(header_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(flow_track, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(flow_canvas, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(flow_dot, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(header_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(flow_track, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(flow_canvas, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(flow_dot, LV_OBJ_FLAG_HIDDEN);
-    }
-    apply_battery_visibility();
+    forced_view_override = view;
+    apply_view_state(view);
 }
 
 bool ui_is_ble_connected(void) {
@@ -1609,6 +1613,7 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     (void)name;
     (void)mac;
     s_ble_connected = (state == BLE_STATE_CONNECTED);
+    if (!s_ble_connected) forced_view_override = -1;
     update_view_state();
 }
 
