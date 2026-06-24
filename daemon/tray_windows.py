@@ -112,8 +112,13 @@ def header_text(ts: TrayState) -> str:
 
 # ── OpenCode Go settings dialog ────────────────────────────────────────────
 
-def _opencode_go_dialog() -> None:
-    """Open a small Tkinter dialog to set OpenCode Go credentials."""
+def _opencode_go_dialog(ts: object = None) -> None:
+    """Open a Tkinter dialog to set OpenCode Go credentials.
+
+    Args:
+        ts: Optional TrayState — if provided, shows a notification and
+            triggers provider refresh after saving.
+    """
     import tkinter as tk
     from tkinter import messagebox
 
@@ -133,7 +138,7 @@ def _opencode_go_dialog() -> None:
     win.resizable(False, False)
     win.configure(bg="#1e1e1e")
     win.update_idletasks()
-    w, h = 520, 280
+    w, h = 560, 360
     x = (win.winfo_screenwidth() - w) // 2
     y = (win.winfo_screenheight() - h) // 2
     win.geometry(f"{w}x{h}+{x}+{y}")
@@ -142,7 +147,18 @@ def _opencode_go_dialog() -> None:
     entry_font = ("Consolas", 10)
     btn_font = ("Segoe UI", 10)
 
-    def _save() -> None:
+    # ── Validation label (hidden by default) ──
+    lbl_status = tk.Label(
+        win, text="", bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
+    )
+    lbl_status.pack(anchor="w", **{"padx": 20, "pady": (4, 0)})
+
+    def _set_status(msg: str, color: str = "#cccccc") -> None:
+        lbl_status.config(text=msg, fg=color)
+        win.update_idletasks()
+
+    def _test_and_save() -> None:
+        """Validate the cookie against the dashboard, then save."""
         wid = entry_wid.get().strip()
         cookie = entry_cookie.get().strip()
         if not wid:
@@ -151,6 +167,61 @@ def _opencode_go_dialog() -> None:
         if not cookie:
             messagebox.showerror("Error", "Auth Cookie is required", parent=win)
             return
+
+        _set_status("⏳ Validating credentials…", "#cccccc")
+
+        # Test the dashboard fetch (synchronous HTTP call)
+        import urllib.request
+        url = f"https://opencode.ai/workspace/{wid}/go"
+        req = urllib.request.Request(url, headers={
+            "Cookie": f"auth={cookie}",
+            "User-Agent": "clawdmeter/1.0",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                html = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            _set_status("", "#cccccc")
+            if e.code == 401 or e.code == 403:
+                messagebox.showerror(
+                    "Authentication Failed",
+                    f"Server returned HTTP {e.code}.\n\n"
+                    "Your auth cookie may be expired.\n"
+                    "Open opencode.ai → F12 → Application → Cookies\n"
+                    "and copy a fresh 'auth' cookie.",
+                    parent=win,
+                )
+            else:
+                messagebox.showerror(
+                    "Connection Error",
+                    f"HTTP {e.code} when contacting OpenCode.\n"
+                    "Check your workspace ID and try again.",
+                    parent=win,
+                )
+            return
+        except (urllib.error.URLError, OSError) as e:
+            _set_status("", "#cccccc")
+            messagebox.showerror(
+                "Network Error",
+                f"Could not reach opencode.ai:\n{e}",
+                parent=win,
+            )
+            return
+
+        # Verify the page actually has usage data (not a login page)
+        if "rollingUsage" not in html and "weeklyUsage" not in html:
+            _set_status("", "#cccccc")
+            messagebox.showerror(
+                "Invalid Response",
+                "The dashboard page didn't contain usage data.\n"
+                "Check your workspace ID and auth cookie.",
+                parent=win,
+            )
+            return
+
+        _set_status("✅ Credentials valid — saving…", "#5a7aff")
+
+        # Save to file
         try:
             config_dir.mkdir(parents=True, exist_ok=True)
             cred_data = json.dumps(
@@ -165,56 +236,105 @@ def _opencode_go_dialog() -> None:
             except Exception:
                 pass
         except OSError as e:
+            _set_status("", "#cccccc")
             messagebox.showerror("Error", f"Failed to save:\n{e}", parent=win)
             return
-        messagebox.showinfo(
-            "Saved",
-            f"Credentials saved to:\n{cred_file}\n\n"
-            "The daemon will pick them up on the next poll cycle.",
-            parent=win,
-        )
-        win.destroy()
+
+        # Auto-set provider to "go"
+        from daemon.config import set_provider
+        set_provider("go")
+
+        # Show success notification
+        if ts is not None:
+            try:
+                ts.set_connected(time.time())
+                if hasattr(ts, "set_state"):
+                    ts.state = "connected"
+            except Exception:
+                pass
+
+        _set_status("✅ Saved! Provider set to OpenCode Go.", "#5a7aff")
+        win.after(1200, win.destroy)
+
+    # ── Widgets ────────────────────────────────────────
 
     pad = {"padx": 20, "pady": (20, 0)}
     pad_small = {"padx": 20, "pady": (8, 0)}
+    pad_btn = {"padx": 20, "pady": (16, 20)}
 
     lbl_info = tk.Label(
         win,
-        text="Paste your OpenCode Go credentials below.\n"
-             "Get them from: opencode.ai → DevTools (F12) → Cookies → auth",
+        text="Paste your credentials below. I'll test them before saving.",
         justify=tk.LEFT, bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
     )
     lbl_info.pack(anchor="w", **pad)
 
+    # Workspace ID
     frm_id = tk.Frame(win, bg="#1e1e1e")
     frm_id.pack(fill="x", **pad_small)
     lbl_id = tk.Label(frm_id, text="Workspace ID", bg="#1e1e1e", fg="#e0e0e0",
-                      font=label_font, width=16, anchor="w")
+                      font=label_font, width=14, anchor="w")
     lbl_id.pack(side=tk.LEFT)
     entry_wid = tk.Entry(frm_id, font=entry_font, bg="#2d2d2d", fg="#ffffff",
                          insertbackground="#ffffff", relief=tk.FLAT, bd=6)
     entry_wid.insert(0, existing_wid)
     entry_wid.pack(side=tk.LEFT, fill="x", expand=True)
 
+    # Auth Cookie — masked with show/hide toggle
     frm_cookie = tk.Frame(win, bg="#1e1e1e")
     frm_cookie.pack(fill="x", **pad_small)
     lbl_cookie = tk.Label(frm_cookie, text="Auth Cookie", bg="#1e1e1e", fg="#e0e0e0",
-                          font=label_font, width=16, anchor="w")
+                          font=label_font, width=14, anchor="w")
     lbl_cookie.pack(side=tk.LEFT)
-    entry_cookie = tk.Entry(frm_cookie, font=entry_font, bg="#2d2d2d", fg="#ffffff",
-                            insertbackground="#ffffff", relief=tk.FLAT, bd=6)
+
+    cookie_frame = tk.Frame(frm_cookie, bg="#2d2d2d", highlightthickness=0)
+    cookie_frame.pack(side=tk.LEFT, fill="x", expand=True)
+
+    cookie_visible = [False]  # mutable closure for toggle
+
+    def _toggle_cookie_visibility() -> None:
+        cookie_visible[0] = not cookie_visible[0]
+        entry_cookie.config(show="" if cookie_visible[0] else "*")
+        btn_eye.config(text="🙈" if cookie_visible[0] else "👁")
+
+    entry_cookie = tk.Entry(cookie_frame, font=entry_font, bg="#2d2d2d", fg="#ffffff",
+                            insertbackground="#ffffff", relief=tk.FLAT, bd=6,
+                            show="*")
     entry_cookie.pack(side=tk.LEFT, fill="x", expand=True)
 
+    btn_eye = tk.Button(cookie_frame, text="👁", command=_toggle_cookie_visibility,
+                        bg="#2d2d2d", fg="#cccccc", relief=tk.FLAT,
+                        font=("Segoe UI", 10), cursor="hand2", bd=0,
+                        padx=6, pady=0)
+    btn_eye.pack(side=tk.RIGHT)
+
+    # How-to instructions
+    lbl_help = tk.Label(
+        win,
+        text="How to get these: opencode.ai → log in → F12 → Application →\n"
+             f"Cookies → select 'auth' → copy value",
+        justify=tk.LEFT, bg="#1e1e1e", fg="#777777", font=("Segoe UI", 8),
+    )
+    lbl_help.pack(anchor="w", **{"padx": 20, "pady": (6, 0)})
+
+    # Buttons
     frm_btn = tk.Frame(win, bg="#1e1e1e")
-    frm_btn.pack(fill="x", **{"padx": 20, "pady": (20, 20)})
-    btn_save = tk.Button(frm_btn, text="Save", command=_save,
-                         bg="#3a5fd7", fg="white", font=btn_font,
-                         relief=tk.FLAT, padx=20, pady=4, cursor="hand2")
-    btn_save.pack(side=tk.RIGHT, padx=(8, 0))
+    frm_btn.pack(fill="x", **pad_btn)
+
+    btn_validate = tk.Button(
+        frm_btn, text="✓  Validate & Save", command=_test_and_save,
+        bg="#3a5fd7", fg="white", font=btn_font,
+        relief=tk.FLAT, padx=20, pady=5, cursor="hand2",
+    )
+    btn_validate.pack(side=tk.RIGHT, padx=(8, 0))
+
     btn_cancel = tk.Button(frm_btn, text="Cancel", command=win.destroy,
                            bg="#3a3a3a", fg="#cccccc", font=btn_font,
-                           relief=tk.FLAT, padx=20, pady=4, cursor="hand2")
+                           relief=tk.FLAT, padx=20, pady=5, cursor="hand2")
     btn_cancel.pack(side=tk.RIGHT)
+
+    # Bind Enter key to save
+    win.bind("<Return>", lambda _: _test_and_save())
 
     entry_cookie.focus_set()
     win.mainloop()
@@ -349,7 +469,7 @@ def main() -> None:
     def _on_opencode_go_settings(_icon_ref, _item) -> None:
         """Open the Tkinter credential dialog in a separate thread so pystray doesn't block."""
         import threading as _t
-        _t.Thread(target=_opencode_go_dialog, daemon=True).start()
+        _t.Thread(target=lambda: _opencode_go_dialog(ts=ts), daemon=True).start()
 
     def _provider_item(provider):
         return MenuItem(
