@@ -32,6 +32,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     ProviderSpec(PROVIDER_AUTO, "Auto", auto_probe=False),
     ProviderSpec("codex", "Codex", aliases=("openai", "opencode")),
     ProviderSpec("claude", "Claude"),
+    ProviderSpec("go", "OpenCode Go", aliases=("opencode-go",)),
 )
 
 

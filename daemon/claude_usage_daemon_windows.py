@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Clawdmeter usage daemon for native Windows.
 
-Supports Claude usage via the Anthropic OAuth flow and Codex usage via the
-local Codex auth store plus OpenAI usage endpoints. Both providers emit the
-same BLE payload shape so the firmware can stay provider-agnostic.
+Supports Claude usage via the Anthropic OAuth flow, Codex usage via the
+local Codex auth store plus OpenAI usage endpoints, and OpenCode Go
+usage via dashboard scraping. All providers emit the same BLE payload
+shape so the firmware can stay provider-agnostic.
 """
 
 import asyncio
@@ -29,7 +30,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
 from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
-from daemon.payloads import build_claude_usage_payload, build_codex_usage_payload
+from daemon.payloads import build_claude_usage_payload, build_codex_usage_payload, build_opencode_go_payload
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
@@ -400,12 +401,112 @@ async def poll_codex_api(creds: dict, *, retry_on_401: bool = True) -> dict | No
     return None
 
 
+# ── OpenCode Go ────────────────────────────────────────────────────────────
+
+GO_DASHBOARD_URL = "https://opencode.ai/workspace/{workspace_id}/go"
+
+
+def _read_opencode_go_credentials() -> dict | None:
+    """Return {workspace_id, auth_cookie} from env or config file, or None."""
+    wid = os.environ.get("OPENCODE_GO_WORKSPACE_ID", "").strip()
+    cookie = os.environ.get("OPENCODE_GO_AUTH_COOKIE", "").strip()
+    if wid and cookie:
+        return {"workspace_id": wid, "auth_cookie": cookie}
+
+    config_paths = [
+        Path.home() / ".config" / "clawdmeter" / "opencode-go-credentials.json",
+        Path.home() / ".config" / "opencode" / "opencode-go-usage.json",
+    ]
+    for path in config_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        wid = data.get("workspaceId") or data.get("workspace_id") or ""
+        cookie = data.get("authCookie") or data.get("auth_cookie") or ""
+        if isinstance(wid, str) and isinstance(cookie, str) and wid and cookie:
+            return {"workspace_id": wid, "auth_cookie": cookie}
+    return None
+
+
+def _parse_opencode_go_html(html: str) -> dict | None:
+    """Extract rolling/weekly/monthly usage data from dashboard HTML.
+
+    The page embeds JS variables like::
+
+        rollingUsage: $R[42]={"used":0.0,"limit":12.0,...}
+        weeklyUsage:  $R[43]={"used":5.1,"limit":30.0,...}
+        monthlyUsage: $R[44]={"used":5.0,"limit":60.0,...}
+    """
+    patterns = {
+        "rolling": r'rollingUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+        "weekly": r'weeklyUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+        "monthly": r'monthlyUsage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})',
+    }
+
+    result = {}
+    for key, pat in patterns.items():
+        m = re.search(pat, html)
+        if not m:
+            log(f"OpenCode Go: {key} usage not found in dashboard HTML")
+            continue
+        raw = m.group(1)
+        # Fix unquoted JS object keys → valid JSON
+        quoted = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3', raw)
+        try:
+            data = json.loads(quoted)
+        except json.JSONDecodeError as e:
+            log(f"OpenCode Go: failed to parse {key} data: {e}")
+            continue
+        if isinstance(data, dict):
+            result[key] = data
+
+    return result if result else None
+
+
+async def poll_opencode_go_api(creds: dict) -> dict | None:
+    """Fetch OpenCode Go dashboard and return a BLE-ready payload."""
+    wid = creds.get("workspace_id", "")
+    cookie = creds.get("auth_cookie", "")
+    url = GO_DASHBOARD_URL.format(workspace_id=wid)
+    headers = {
+        "Cookie": f"auth={cookie}",
+        "User-Agent": "clawdmeter/1.0",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        log(f"OpenCode Go: HTTP request failed: {e}")
+        return None
+
+    if resp.status_code == 401 or resp.status_code == 403:
+        log(f"OpenCode Go: auth failed (HTTP {resp.status_code}) — cookie may be expired")
+        return None
+    if resp.status_code >= 400:
+        log(f"OpenCode Go: HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+
+    parsed = _parse_opencode_go_html(resp.text)
+    if parsed is None:
+        log("OpenCode Go: no usage data found in dashboard")
+        return None
+
+    return build_opencode_go_payload(parsed, now=time.time())
+
+
 def _select_named_usage_source(provider: str) -> tuple[str | None, object | None, str | None]:
     if provider == "codex":
         codex_creds = _read_codex_credentials()
         if codex_creds is not None:
             return "codex", codex_creds, None
         return None, None, "Codex sign-in missing"
+
+    if provider == "go":
+        go_creds = _read_opencode_go_credentials()
+        if go_creds is not None:
+            return "go", go_creds, None
+        return None, None, "OpenCode Go credentials missing"
 
     if provider == "claude":
         token = read_token()
@@ -702,6 +803,8 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                 else:
                     if source == "codex":
                         payload = await poll_codex_api(source_data)
+                    elif source == "go":
+                        payload = await poll_opencode_go_api(source_data)
                     else:
                         try:
                             payload = await poll_api(source_data)

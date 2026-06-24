@@ -120,6 +120,55 @@ def build_claude_usage_payload(headers: Mapping[str, str], *, now: float) -> dic
     )
 
 
+def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict:
+    """Build a BLE payload from OpenCode Go subscription usage data.
+
+    ``parsed`` must have keys ``rolling``, ``weekly``, ``monthly``, each a
+    dict with ``used`` (float) and ``limit`` (float).  Optional ``periodEnd``
+    (epoch seconds) for reset timing.
+
+    The firmware's two-card display maps:
+      - **Top card** (``window_short``) → rolling 5-hour usage
+      - **Bottom card** (``window_long``) → weekly usage
+
+    Monthly usage is carried in the status string so a future firmware rev
+    can surface it without a protocol break.
+    """
+    current_time = time.time() if now is None else now
+
+    def _pct(u: dict) -> int:
+        lim = u.get("limit", 0) or 1
+        used = u.get("used", 0) or 0
+        return max(0, min(100, int(round(used / lim * 100))))
+
+    def _reset_mins(u: dict) -> int:
+        end = u.get("periodEnd")
+        if end is None:
+            return 0
+        try:
+            secs = float(end) - current_time
+        except (TypeError, ValueError):
+            return 0
+        return int(round(secs / 60)) if secs > 0 else 0
+
+    rolling_pct = _pct(parsed.get("rolling", {}))
+    rolling_reset = _reset_mins(parsed.get("rolling", {}))
+    weekly_pct = _pct(parsed.get("weekly", {}))
+    weekly_reset = _reset_mins(parsed.get("weekly", {}))
+    monthly_pct = _pct(parsed.get("monthly", {}))
+
+    status = f"m{monthly_pct}" if monthly_pct else "allowed"
+
+    return build_windowed_payload(
+        provider="go",
+        top_pct=rolling_pct,
+        top_reset_mins=rolling_reset,
+        bottom_pct=weekly_pct,
+        bottom_reset_mins=weekly_reset,
+        status=status,
+    )
+
+
 def build_codex_usage_payload(payload: Mapping[str, object], *, now: float | None = None) -> dict:
     rate_limit = payload.get("rate_limit") or {}
     if not isinstance(rate_limit, Mapping):
