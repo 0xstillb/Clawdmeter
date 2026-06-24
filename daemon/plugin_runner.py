@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -196,6 +197,7 @@ class PluginRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=plugin_env,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except OSError as e:
             raise PluginCrashedError(
