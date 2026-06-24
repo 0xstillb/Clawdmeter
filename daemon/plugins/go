@@ -39,12 +39,15 @@ GO_DASHBOARD_URL = "https://opencode.ai/workspace/{workspace_id}/go"
 _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
 
-# Regex patterns to extract usage JS objects from dashboard HTML
-_PATTERNS = {
-    "rolling": r'rollingUsage:\s*(?:\$R\[\d+\]\s*=\s*)?(\{[^}]+\})',
-    "weekly": r'weeklyUsage:\s*(?:\$R\[\d+\]\s*=\s*)?(\{[^}]+\})',
-    "monthly": r'monthlyUsage:\s*(?:\$R\[\d+\]\s*=\s*)?(\{[^}]+\})',
-}
+# Regex pattern to extract the combined usage block from dashboard HTML.
+# The page now embeds a single call like:
+#   $R[28]($R[20],$R[34]={rollingUsage:$R[35]={status:"ok",resetInSec:16390,usagePercent:9},
+#     weeklyUsage:$R[36]={status:"ok",resetInSec:380335,usagePercent:4},
+#     monthlyUsage:$R[37]={status:"ok",resetInSec:2554192,usagePercent:2}})
+# We capture each {status:...,resetInSec:...,usagePercent:...} block individually.
+_USAGE_OBJ_RE = re.compile(
+    r'(rolling|weekly|monthly)Usage:\s*\$R\[\d+\]\s*=\s*(\{[^}]+\})'
+)
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -100,12 +103,9 @@ def _parse_html(html: str) -> dict | None:
         rollingUsage:$R[35]={status:"ok",resetInSec:16437,usagePercent:8}
     """
     result: dict = {}
-    for key, pat in _PATTERNS.items():
-        m = re.search(pat, html)
-        if not m:
-            _debug(f"{key} usage not found in dashboard HTML")
-            continue
-        raw = m.group(1)
+    for match in _USAGE_OBJ_RE.finditer(html):
+        key = match.group(1)
+        raw = match.group(2)
         # Fix unquoted JS object keys -> valid JSON
         quoted = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3', raw)
         try:
@@ -115,6 +115,10 @@ def _parse_html(html: str) -> dict | None:
             continue
         if isinstance(data, dict):
             result[key] = data
+
+    for key in ("rolling", "weekly", "monthly"):
+        if key not in result:
+            _debug(f"{key} usage not found in dashboard HTML")
 
     return result if result else None
 
