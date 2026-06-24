@@ -10,90 +10,147 @@ set "UV_CACHE_DIR=%CD%\.codex-tmp\uv-cache"
 set "UV_PYTHON_INSTALL_DIR=%CD%\.codex-tmp\uv-python"
 set "UV_EXE="
 
-rem ── Provider setup wizard ───────────────────────────────────────────────
 set "CLAWDMETER_CONFIG_DIR=%USERPROFILE%\.config\clawdmeter"
 set "GO_CRED_FILE=%CLAWDMETER_CONFIG_DIR%\opencode-go-credentials.json"
+set "TRAY_CONFIG_DIR=%LOCALAPPDATA%\Clawdmeter"
+set "TRAY_CONFIG=%TRAY_CONFIG_DIR%\config.json"
 
-rem Check if provider is already configured (tray config or env)
-set "HAS_PROVIDER="
-if exist "%LOCALAPPDATA%\Clawdmeter\config.json" (
-    findstr /i "provider" "%LOCALAPPDATA%\Clawdmeter\config.json" >nul && set "HAS_PROVIDER=1"
+rem ── Check for --setup / -s flag ──────────────────────────────────────────
+set "FORCE_SETUP="
+for %%a in (%*) do (
+    if /i "%%a"=="--setup" set "FORCE_SETUP=1"
+    if /i "%%a"=="/setup" set "FORCE_SETUP=1"
+    if /i "%%a"=="-s" set "FORCE_SETUP=1"
 )
-if defined CLAWDMETER_PROVIDER set "HAS_PROVIDER=1"
-if exist "%GO_CRED_FILE%" set "HAS_PROVIDER=1"
 
-if not defined HAS_PROVIDER (
-    echo.
-    echo   ====== Clawdmeter Setup ======
-    echo.
-    echo   Select your AI provider:
-    echo.
-    echo     1) Claude (default — needs claude login)
-    echo     2) Codex (needs Codex auth)
-    echo     3) OpenCode Go (needs workspace ID + auth cookie)
-    echo.
-    set /p "PROVIDER_CHOICE=Enter choice (1/2/3) [1]: "
-    if "!PROVIDER_CHOICE!"=="" set PROVIDER_CHOICE=1
+rem ── Provider setup wizard ───────────────────────────────────────────────
 
-    if "!PROVIDER_CHOICE!"=="3" (
-        goto :setup_opencode_go
-    ) else if "!PROVIDER_CHOICE!"=="2" (
-        set "CLAWDMETER_PROVIDER=codex"
-        echo Setting provider to Codex...
+:setup_prompt
+if defined FORCE_SETUP goto :show_setup_menu
+
+rem Check if already configured
+if exist "%TRAY_CONFIG%" (
+    findstr /i "provider" "%TRAY_CONFIG%" >nul 2>nul
+    if !errorlevel! equ 0 goto :check_go_cookie
+)
+if defined CLAWDMETER_PROVIDER goto :check_go_cookie
+
+goto :show_setup_menu
+
+:check_go_cookie
+rem If provider is OpenCode Go and cred file exists, ask about refresh
+set "CURRENT_PROVIDER=claude"
+if defined CLAWDMETER_PROVIDER set "CURRENT_PROVIDER=%CLAWDMETER_PROVIDER%"
+if exist "%TRAY_CONFIG%" (
+    for /f "tokens=2 delims=:" %%p in ('findstr "provider" "%TRAY_CONFIG%"') do (
+        set "CURRENT_PROVIDER=%%~p"
+    )
+)
+set "CURRENT_PROVIDER=%CURRENT_PROVIDER:"=%
+set "CURRENT_PROVIDER=%CURRENT_PROVIDER: =%
+
+if /i "%CURRENT_PROVIDER%"=="go" (
+    if exist "%GO_CRED_FILE%" (
+        echo.
+        echo OpenCode Go credentials found.
+        echo Press R to refresh auth cookie, or any other key to continue...
+        choice /c RN /n /t 5 /d N >nul 2>nul
+        if !errorlevel! equ 1 goto :setup_opencode_go
     ) else (
-        set "CLAWDMETER_PROVIDER=claude"
-        echo Setting provider to Claude...
+        goto :setup_opencode_go
     )
-
-    rem Save provider to tray config
-    if not exist "%LOCALAPPDATA%\Clawdmeter\" mkdir "%LOCALAPPDATA%\Clawdmeter" >nul 2>nul
-    echo {"provider": "%CLAWDMETER_PROVIDER%"} > "%LOCALAPPDATA%\Clawdmeter\config.json"
-    echo Saved provider to tray config.
-    goto :after_setup
-
-    :setup_opencode_go
-    echo.
-    echo   -- OpenCode Go Setup --
-    echo.
-    echo   How to get your credentials:
-    echo     1) Go to https://opencode.ai and log in
-    echo     2) Open your workspace: the URL will be
-    echo        https://opencode.ai/workspace/wrk_.../go
-    echo     3) The "wrk_..." part is your Workspace ID
-    echo     4) Press F12 ^> Application ^> Cookies ^> copy "auth" value
-    echo.
-    set /p "GO_WID=Enter your Workspace ID (wrk_...): "
-    set /p "GO_COOKIE=Enter your Auth Cookie (Fe26.2**...): "
-
-    if not defined GO_WID (
-        echo Workspace ID is required. Aborting.
-        exit /b 1
-    )
-    if not defined GO_COOKIE (
-        echo Auth cookie is required. Aborting.
-        exit /b 1
-    )
-
-    if not exist "%CLAWDMETER_CONFIG_DIR%" mkdir "%CLAWDMETER_CONFIG_DIR%" >nul 2>nul
-
-    rem Write credentials file
-    > "%GO_CRED_FILE%" (
-        echo {
-        echo   "workspace_id": "%GO_WID%",
-        echo   "auth_cookie": "%GO_COOKIE%"
-        echo }
-    )
-    icacls "%GO_CRED_FILE%" /inheritance:r /grant "%USERNAME%:(R,W)" >nul 2>nul
-
-    rem Also save provider to tray config
-    if not exist "%LOCALAPPDATA%\Clawdmeter\" mkdir "%LOCALAPPDATA%\Clawdmeter" >nul 2>nul
-    echo {"provider": "go"} > "%LOCALAPPDATA%\Clawdmeter\config.json"
-
-    echo.
-    echo OpenCode Go credentials saved to %GO_CRED_FILE%
-    echo (permissions restricted to current user only)
-    goto :after_setup
 )
+goto :after_setup
+
+:show_setup_menu
+echo.
+echo   ====== Clawdmeter Setup ======
+echo.
+echo   Select your AI provider:
+echo.
+echo     1) Claude (default — needs claude login)
+echo     2) Codex (needs Codex auth)
+echo     3) OpenCode Go (needs workspace ID + auth cookie)
+echo.
+echo     (already configured? just press Enter to skip, or
+echo      run "%~nx0 --setup" to force this menu)
+echo.
+set /p "PROVIDER_CHOICE=Enter choice (1/2/3) [skip]: "
+if "!PROVIDER_CHOICE!"=="" goto :after_setup
+
+if "!PROVIDER_CHOICE!"=="3" (
+    goto :setup_opencode_go
+) else if "!PROVIDER_CHOICE!"=="2" (
+    set "CLAWDMETER_PROVIDER=codex"
+    echo Setting provider to Codex...
+) else (
+    set "CLAWDMETER_PROVIDER=claude"
+    echo Setting provider to Claude...
+)
+
+rem Save provider to tray config
+if not exist "%TRAY_CONFIG_DIR%" mkdir "%TRAY_CONFIG_DIR%" >nul 2>nul
+echo {"provider": "%CLAWDMETER_PROVIDER%"} > "%TRAY_CONFIG%"
+echo Saved provider to tray config.
+goto :after_setup
+
+:setup_opencode_go
+cls
+echo.
+echo   ====== OpenCode Go Setup ======
+echo.
+echo   How to get your credentials:
+echo.
+echo     1) Go to https://opencode.ai and log in
+echo     2) The URL will be: https://opencode.ai/workspace/wrk_.../go
+echo        The "wrk_..." part is your Workspace ID
+echo     3) Open DevTools (F12) ^> Application ^> Cookies ^>
+echo        Copy the "auth" cookie value (starts with Fe26.2**)
+echo.
+if exist "%GO_CRED_FILE%" (
+    echo   [Current credentials found — press Enter to keep or type new value]
+    for /f "tokens=2 delims=:" %%w in ('findstr "workspace_id" "%GO_CRED_FILE%"') do (
+        for /f "tokens=* delims= " %%a in ("%%~w") do set "OLD_WID=%%a"
+    )
+    set "OLD_WID=!OLD_WID:"=!
+    set "OLD_WID=!OLD_WID:,=!"
+)
+echo.
+set /p "GO_WID=Workspace ID (wrk_...^) [!OLD_WID!]: "
+if "!GO_WID!"=="" set "GO_WID=!OLD_WID!"
+if not defined GO_WID (
+    echo Workspace ID is required.
+    pause
+    goto :setup_opencode_go
+)
+
+set /p "GO_COOKIE=Auth Cookie (Fe26.2**...^): "
+if not defined GO_COOKIE (
+    echo Auth cookie is required.
+    pause
+    goto :setup_opencode_go
+)
+
+if not exist "%CLAWDMETER_CONFIG_DIR%" mkdir "%CLAWDMETER_CONFIG_DIR%" >nul 2>nul
+
+rem Write credentials file
+> "%GO_CRED_FILE%" (
+    echo {
+    echo   "workspace_id": "%GO_WID%",
+    echo   "auth_cookie": "%GO_COOKIE%"
+    echo }
+)
+icacls "%GO_CRED_FILE%" /inheritance:r /grant "%USERNAME%:(R,W)" >nul 2>nul
+
+rem Save provider to tray config
+if not exist "%TRAY_CONFIG_DIR%" mkdir "%TRAY_CONFIG_DIR%" >nul 2>nul
+echo {"provider": "go"} > "%TRAY_CONFIG%"
+
+echo.
+echo OpenCode Go credentials saved to %GO_CRED_FILE%
+echo (permissions restricted to current user only)
+echo.
+echo Tip: when the cookie expires, just run "%~nx0 --setup"
 
 :after_setup
 echo.
