@@ -54,6 +54,8 @@ static void note_touch_sample(bool pressed) {
 #endif
 static uint16_t* buf1 = nullptr;
 static uint16_t* buf2 = nullptr;
+static bool screenshot_stream_active = false;
+static uint32_t screenshot_stream_bytes = 0;
 
 static uint32_t my_tick(void) { return millis(); }
 
@@ -61,6 +63,17 @@ static void my_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_m
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     display_hal_draw_bitmap(area->x1, area->y1, w, h, (uint16_t*)px_map);
+    if (screenshot_stream_active) {
+        const uint32_t tile_bytes = (uint32_t)w * (uint32_t)h * 2U;
+        Serial.printf("SCREENSHOT_TILE %ld %ld %ld %ld %lu\n",
+                      (long)area->x1, (long)area->y1, (long)w, (long)h,
+                      (unsigned long)tile_bytes);
+        Serial.flush();
+        Serial.write(px_map, tile_bytes);
+        Serial.flush();
+        Serial.println();
+        screenshot_stream_bytes += tile_bytes;
+    }
     lv_display_flush_ready(disp);
 }
 
@@ -125,12 +138,33 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
+static void send_screenshot_streamed(void) {
+    const uint32_t w = board_caps().width;
+    const uint32_t h = board_caps().height;
+    const uint32_t raw_size = w * h * 2U;
+
+    screenshot_stream_active = true;
+    screenshot_stream_bytes = 0;
+
+    Serial.printf("SCREENSHOT_BEGIN %lu %lu %lu\n",
+                  (unsigned long)w, (unsigned long)h, (unsigned long)raw_size);
+    Serial.flush();
+
+    lv_obj_invalidate(lv_screen_active());
+    lv_refr_now(NULL);
+
+    screenshot_stream_active = false;
+    if (screenshot_stream_bytes != raw_size) {
+        Serial.printf("SCREENSHOT_MISMATCH %lu %lu\n",
+                      (unsigned long)screenshot_stream_bytes,
+                      (unsigned long)raw_size);
+    }
+    Serial.println("SCREENSHOT_END");
+}
+
 static void send_screenshot() {
 #ifndef BOARD_HAS_PSRAM
-    // A full RGB565 framebuffer doesn't fit in internal SRAM on PSRAM-free
-    // boards (e.g. 480×480×2 = 460 KB). Capture is unsupported there.
-    Serial.println("SCREENSHOT_UNSUPPORTED");
-    return;
+    send_screenshot_streamed();
 #else
     const uint32_t w = board_caps().width;
     const uint32_t h = board_caps().height;
