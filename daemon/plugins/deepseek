@@ -166,9 +166,9 @@ def _compute_daily_spend(current_balance: float, currency: str) -> dict:
 
 
 def _minutes_until_midnight() -> int:
-    """Minutes from now until 00:00 tomorrow."""
+    """Minutes from now until 00:00 tomorrow (local time)."""
     import datetime as dt
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now()  # local time
     tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
     return int((tomorrow - now).total_seconds() / 60)
 
