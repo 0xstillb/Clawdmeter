@@ -208,11 +208,19 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     )
 
 
-def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None, total_top_up: float = 0) -> dict:
+def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None,
+                                  total_top_up: float = 0,
+                                  daily_spent: float = 0,
+                                  daily_spent_pct: int = 0,
+                                  daily_reset_mins: int = 1440) -> dict:
     """Build a BLE payload from DeepSeek balance API data (prepaid model).
 
     DeepSeek is a prepaid (เติมเงิน) provider — usage is based on
     remaining balance vs total amount topped up.
+
+    UI Layout:
+      - **Top card** (``budget_daily``) → daily spend in $ + % of day budget
+      - **Bottom card** (``wallet_depletion``) → total balance remaining in $
 
     ``balance_data`` shape from ``GET /user/balance``::
 
@@ -227,13 +235,9 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
         }
 
     ``total_top_up`` is the user's configured total top-up amount (optional).
-    If provided, ``used_pct = (total_top_up - current_topped_up) / total_top_up * 100``.
-    If omitted, the plugin reports remaining balance as a flat 0% usage with
-    the balance amount in subtext.
+    Used for computing remaining/consumed percentages.
 
-    Mapping:
-      - Top card (``wallet_depletion``) → remaining balance %
-      - Bottom card (``budget_daily``) → consumed %
+    ``daily_spent`` / ``daily_spent_pct`` come from the plugin's state tracking.
     """
     infos = balance_data.get("balance_infos", [])
     if not isinstance(infos, list) or not infos:
@@ -244,22 +248,17 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
     currency = info.get("currency", "CNY")
     total_balance = float(info.get("total_balance", 0) or 0)
     topped_up_balance = float(info.get("topped_up_balance", 0) or 0)
-    granted_balance = float(info.get("granted_balance", 0) or 0)
 
-    # ── Compute usage percentage ────────────────────────────────────
-    used_pct = 0
+    # ── Remaining % (for bar & bottom card) ───────────────────────────
     remaining_pct = 100
-
     if total_top_up > 0 and topped_up_balance > 0:
         consumed = max(0, total_top_up - topped_up_balance)
         used_pct = max(0, min(100, int(round(consumed / total_top_up * 100))))
         remaining_pct = 100 - used_pct
     elif total_balance > 0:
-        # Without total_top_up, just show total_balance as "health"
-        # where higher balance = more remaining
-        remaining_pct = min(100, int(total_balance))  # rough: treat balance as %
-        used_pct = 100 - remaining_pct
+        remaining_pct = min(100, int(total_balance))
 
+    # ── Status ────────────────────────────────────────────────────────
     status = "allowed" if is_available else "limited"
     if remaining_pct <= 10:
         status = "limited"
@@ -269,7 +268,17 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
     return build_provider_payload(
         provider="deepseek",
         mode="prepaid",
+        # Top card: daily spend ($ amount + % of day budget)
         top={
+            "label": "Today",
+            "kind": "budget_daily",
+            "pct": daily_spent_pct,
+            "reset_mins": daily_reset_mins,
+            "has_reset": daily_reset_mins > 0,
+            "subtext": f"{daily_spent:.2f} {currency} spent" if daily_spent > 0 else "no spend",
+        },
+        # Bottom card: total balance remaining ($ amount)
+        bottom={
             "label": "Balance",
             "kind": "wallet_depletion",
             "pct": remaining_pct,
@@ -277,21 +286,13 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
             "has_reset": False,
             "subtext": f"{total_balance:.2f} {currency}",
         },
-        bottom={
-            "label": "Used",
-            "kind": "budget_daily",
-            "pct": used_pct,
-            "reset_mins": 1440,
-            "has_reset": True,
-            "subtext": f"{used_pct}% consumed" if used_pct > 0 else "topped up",
-        },
         status=status,
         ok=is_available,
         legacy_aliases={
             "s": remaining_pct,
             "sr": 0,
-            "w": used_pct,
-            "wr": 1440,
+            "w": daily_spent_pct,
+            "wr": daily_reset_mins,
         },
     )
 
@@ -302,20 +303,20 @@ def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
         provider="deepseek",
         mode="prepaid",
         top={
+            "label": "Today",
+            "kind": "budget_daily",
+            "pct": 0,
+            "reset_mins": 1440,
+            "has_reset": True,
+            "subtext": "unavailable",
+        },
+        bottom={
             "label": "Balance",
             "kind": "wallet_depletion",
             "pct": 0,
             "reset_mins": 0,
             "has_reset": False,
             "subtext": "unavailable",
-        },
-        bottom={
-            "label": "Used",
-            "kind": "budget_daily",
-            "pct": 0,
-            "reset_mins": 1440,
-            "has_reset": True,
-            "subtext": "unknown",
         },
         status="unknown",
         ok=False,
