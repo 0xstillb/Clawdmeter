@@ -523,9 +523,13 @@ void loop() {
         if (usage_parse_json(ble_get_data(), &usage)) {
             int g_before = usage_rate_group();
             float rate_pct = usage.top.pct;
-            // All subscription/prepaid providers send remaining %,
-            // so invert for the rate animation (high consumption = intense)
-            rate_pct = 100.0f - rate_pct;
+            if (strcmp(usage.plan_type, "prepaid") == 0) {
+                // Prepaid: top.pct is daily spend % — use directly
+                // (already consumption rate, no inversion needed)
+            } else {
+                // Subscription: top.pct is remaining % — invert to get used %
+                rate_pct = 100.0f - rate_pct;
+            }
             usage_rate_sample(rate_pct);
             int g_after = usage_rate_group();
             if (g_after != g_before) {

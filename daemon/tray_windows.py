@@ -121,6 +121,160 @@ def header_text(ts: TrayState) -> str:
     return f"Error: {ts.reason}"
 
 
+# ── Generic API key dialog ───────────────────────────────────────────────
+
+def _apikey_dialog(*, title: str, provider_id: str, cred_filename: str,
+                    label: str, help_text: str, ts: object = None) -> None:
+    """Open a Tkinter dialog to set a simple API key credential.
+
+    Args:
+        title: Window title (e.g. "DeepSeek — API Key")
+        provider_id: Provider ID to set after saving (e.g. "deepseek")
+        cred_filename: JSON filename in ~/.config/clawdmeter/ (e.g. "deepseek-credentials.json")
+        label: Field label (e.g. "DeepSeek API Key")
+        help_text: Instructions shown below the field
+        ts: Optional TrayState for refresh after save
+    """
+    import tkinter as tk
+    from tkinter import messagebox
+
+    config_dir = Path.home() / ".config" / "clawdmeter"
+    cred_file = config_dir / cred_filename
+
+    existing_key = ""
+    if cred_file.exists():
+        try:
+            data = json.loads(cred_file.read_text(encoding="utf-8"))
+            existing_key = data.get("api_key", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    win = tk.Tk()
+    win.title(title)
+    win.resizable(False, False)
+    win.configure(bg="#1e1e1e")
+    win.update_idletasks()
+    w, h = 500, 240
+    x = (win.winfo_screenwidth() - w) // 2
+    y = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+    label_font = ("Segoe UI", 10, "bold")
+    entry_font = ("Consolas", 10)
+    btn_font = ("Segoe UI", 10)
+
+    lbl_status = tk.Label(win, text="", bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9))
+    lbl_status.pack(anchor="w", **{"padx": 20, "pady": (4, 0)})
+
+    def _set_status(msg: str, color: str = "#cccccc") -> None:
+        lbl_status.config(text=msg, fg=color)
+        win.update_idletasks()
+
+    def _test_and_save() -> None:
+        key = entry_key.get().strip()
+        if not key:
+            messagebox.showerror("Error", "API Key is required", parent=win)
+            return
+        _set_status("Testing…", "#5a7aff")
+
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            cred_file.write_text(
+                json.dumps({"api_key": key}, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            _set_status("", "#cccccc")
+            messagebox.showerror("Error", f"Failed to save:\n{e}", parent=win)
+            return
+
+        from daemon.config import set_provider
+        set_provider(provider_id)
+
+        if ts is not None:
+            ts.request_refresh()
+
+        _set_status(f"✅ Saved! Provider set to {provider_id}.", "#5a7aff")
+        win.after(1200, win.destroy)
+
+    pad = {"padx": 20, "pady": (20, 0)}
+    pad_small = {"padx": 20, "pady": (8, 0)}
+    pad_btn = {"padx": 20, "pady": (16, 20)}
+
+    lbl_info = tk.Label(
+        win, text=f"Paste your {label} below.",
+        justify=tk.LEFT, bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
+    )
+    lbl_info.pack(anchor="w", **pad)
+
+    frm_key = tk.Frame(win, bg="#1e1e1e")
+    frm_key.pack(fill="x", **pad_small)
+    lbl = tk.Label(frm_key, text=label, bg="#1e1e1e", fg="#e0e0e0",
+                   font=label_font, width=16, anchor="w")
+    lbl.pack(side=tk.LEFT)
+    entry_key = tk.Entry(frm_key, font=entry_font, bg="#2d2d2d", fg="#ffffff",
+                         insertbackground="#ffffff", relief=tk.FLAT, bd=6)
+    entry_key.insert(0, existing_key)
+    entry_key.pack(side=tk.LEFT, fill="x", expand=True)
+
+    lbl_help = tk.Label(
+        win, text=help_text,
+        justify=tk.LEFT, bg="#1e1e1e", fg="#777777", font=("Segoe UI", 8),
+    )
+    lbl_help.pack(anchor="w", **{"padx": 20, "pady": (6, 0)})
+
+    frm_btn = tk.Frame(win, bg="#1e1e1e")
+    frm_btn.pack(fill="x", **pad_btn)
+
+    btn_validate = tk.Button(
+        frm_btn, text="✓  Save", command=_test_and_save,
+        bg="#3a5fd7", fg="white", font=btn_font,
+        relief=tk.FLAT, padx=20, pady=5, cursor="hand2",
+    )
+    btn_validate.pack(side=tk.RIGHT, padx=(8, 0))
+
+    btn_cancel = tk.Button(frm_btn, text="Cancel", command=win.destroy,
+                           bg="#3a3a3a", fg="#cccccc", font=btn_font,
+                           relief=tk.FLAT, padx=20, pady=5, cursor="hand2")
+    btn_cancel.pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda _: _test_and_save())
+    entry_key.focus_set()
+    win.mainloop()
+
+
+# ── Provider settings dialogs ────────────────────────────────────────────
+
+def _deepseek_dialog(ts: object = None) -> None:
+    _apikey_dialog(
+        title="DeepSeek — API Key",
+        provider_id="deepseek",
+        cred_filename="deepseek-credentials.json",
+        label="DeepSeek API Key",
+        help_text="Get this from platform.deepseek.com → API Keys",
+        ts=ts,
+    )
+
+def _openrouter_dialog(ts: object = None) -> None:
+    _apikey_dialog(
+        title="OpenRouter — API Key",
+        provider_id="openrouter",
+        cred_filename="openrouter-credentials.json",
+        label="OpenRouter API Key",
+        help_text="Get this from openrouter.ai/keys",
+        ts=ts,
+    )
+
+def _zen_dialog(ts: object = None) -> None:
+    _apikey_dialog(
+        title="OpenCode Zen — API Key",
+        provider_id="zen",
+        cred_filename="zen-credentials.json",
+        label="Zen API Key",
+        help_text="Get this from opencode.ai → Settings → API Keys",
+        ts=ts,
+    )
+
+
 # ── OpenCode Go settings dialog ────────────────────────────────────────────
 
 def _opencode_go_dialog(ts: object = None) -> None:
@@ -562,6 +716,18 @@ def main() -> None:
         import threading as _t
         _t.Thread(target=lambda: _opencode_go_dialog(ts=ts), daemon=True).start()
 
+    def _on_deepseek_settings(_icon_ref, _item) -> None:
+        import threading as _t
+        _t.Thread(target=lambda: _deepseek_dialog(ts=ts), daemon=True).start()
+
+    def _on_openrouter_settings(_icon_ref, _item) -> None:
+        import threading as _t
+        _t.Thread(target=lambda: _openrouter_dialog(ts=ts), daemon=True).start()
+
+    def _on_zen_settings(_icon_ref, _item) -> None:
+        import threading as _t
+        _t.Thread(target=lambda: _zen_dialog(ts=ts), daemon=True).start()
+
     def _provider_item(provider):
         return MenuItem(
             provider.label,
@@ -573,7 +739,15 @@ def main() -> None:
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
         MenuItem("Provider", Menu(*(_provider_item(provider) for provider in discover_providers()))),
-        MenuItem("OpenCode Go Settings...", _on_opencode_go_settings),
+        Menu.SEPARATOR,
+        MenuItem("Credentials",
+            Menu(
+                MenuItem("DeepSeek API Key...", _on_deepseek_settings),
+                MenuItem("OpenRouter API Key...", _on_openrouter_settings),
+                MenuItem("Zen API Key...", _on_zen_settings),
+                MenuItem("OpenCode Go...", _on_opencode_go_settings),
+            )
+        ),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
         MenuItem("Quit", _on_quit),

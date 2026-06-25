@@ -55,6 +55,28 @@ The plugin writes EXACTLY ONE JSON line to stdout, then exits.
 Payload must include at minimum `p` (provider id), `mode`, `top`, `bottom`, `st`, and `ok`.
 Include legacy flat fields (`s`, `sr`, `w`, `wr`) for backward BLE compatibility.
 
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `p` | string | — | Provider identifier (e.g. `"claude"`, `"deepseek"`) |
+| `plan_type` | string | `"subscription"` | Billing model: `"subscription"` (rate-limited) or `"prepaid"` (credit/balance-based) |
+| `mode` | string | `"window"` | Display mode: `"window"` or `"prepaid"` |
+| `top` / `bottom` | object | — | Panel data (see below) |
+| `st` | string | `"unknown"` | Status: `"allowed"`, `"limited"`, `"warning"`, `"unknown"` |
+| `ok` | boolean | `true` | Whether the poll succeeded |
+
+### Panel fields (`top`, `bottom`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `label` | string | Short label shown as pill (e.g. `"Current"`, `"Balance"`) |
+| `kind` | string | Panel type: `"window_short"`, `"window_long"`, `"wallet_depletion"`, `"budget_daily"` |
+| `pct` | int | Percentage (0–100). For subscription: remaining %. For prepaid: daily spend % (top) or remaining % (bottom) |
+| `reset_mins` | int | Minutes until reset (0 = no reset) |
+| `has_reset` | boolean | Whether a reset time is meaningful |
+| `subtext` | string | Additional info (e.g. balance amount `"55.00 CNY"`) |
+
 ### Transient failure (retry next poll)
 
 ```json

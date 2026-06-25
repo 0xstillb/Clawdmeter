@@ -41,6 +41,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     ProviderSpec("codex", "Codex", aliases=("openai", "opencode")),
     ProviderSpec("claude", "Claude"),
     ProviderSpec("go", "OpenCode Go", aliases=("opencode-go",)),
+    ProviderSpec("deepseek", "DeepSeek"),
+    ProviderSpec("minimax", "MiniMax"),
+    ProviderSpec("openrouter", "OpenRouter", aliases=("or",)),
+    ProviderSpec("zen", "OpenCode Zen"),
 )
 
 
