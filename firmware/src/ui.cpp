@@ -5,6 +5,7 @@
 #include "theme.h"
 #include "pet_buffer.h"
 #include "hal/board_caps.h"
+#include <Arduino.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -131,7 +132,7 @@ struct PanelWidgets {
 
 static Layout L = {};
 static lv_image_dsc_t battery_dscs[5];
-static uint16_t brand_canvas_buf[54 * 54];
+static uint8_t brand_canvas_buf[54 * 54 * 3];
 static uint16_t ble_canvas_buf[14 * 16];
 static uint16_t pair_ble_canvas_buf[26 * 42];
 static uint8_t idle_canvas_buf[20 * 20 * 3];  // RGB565A8: 2 bytes RGB + 1 byte alpha per pixel
@@ -239,21 +240,21 @@ static void compute_layout(const BoardCaps& c) {
     if (c.width > c.height) {
         L.mode = LAYOUT_LANDSCAPE_SMALL;
         L.pad_t = 8;
-        L.header_h = 64;
+        L.header_h = 62;
         L.chip_x = 10;
-        L.chip_y = 7;
-        L.chip_w = 60;
-        L.chip_h = 58;
-        L.chip_radius = 14;
-        L.title_x = 72;
-        L.title_y = 6;
-        L.title_w = 160;
+        L.chip_y = 8;
+        L.chip_w = 58;
+        L.chip_h = 56;
+        L.chip_radius = 16;
+        L.title_x = 74;
+        L.title_y = 8;
+        L.title_w = 150;
         L.provider_y = 36;
-        L.bt_x = 266;
+        L.bt_x = 272;
         L.bt_y = 18;
-        L.agent_size = 22;
-        L.agent_x = 286;
-        L.agent_y = 16;
+        L.agent_size = 24;
+        L.agent_x = 290;
+        L.agent_y = 14;
         L.battery_x = 230;
         L.battery_y = 12;
         L.flow_x = 10;
@@ -264,22 +265,22 @@ static void compute_layout(const BoardCaps& c) {
         L.card_x = 10;
         L.card2_x = L.card_x;
         L.card_w = 300;
-        L.card_h = 82;
-        L.card1_y = 74;
-        L.card2_y = 156;
+        L.card_h = 78;
+        L.card1_y = 76;
+        L.card2_y = 158;
         L.card_radius = 12;
-        L.card_pad_l = 10;
-        L.card_pad_r = 10;
+        L.card_pad_l = 12;
+        L.card_pad_r = 12;
         L.card_pad_t = 6;
         L.card_pad_b = 5;
         L.kicker_y = 0;
-        L.pct_y = 12;
+        L.pct_y = 10;
         L.pill_y = 4;
-        L.bar_y = 45;
+        L.bar_y = 43;
         L.bar_h = 9;
-        L.meta_y = 61;
+        L.meta_y = 59;
         L.meta_dot = 6;
-        L.meta_right_w = 78;
+        L.meta_right_w = 82;
         L.pair_hero_x = 22;
         L.pair_hero_y = 98;
         L.pair_hero_size = 90;
@@ -293,7 +294,7 @@ static void compute_layout(const BoardCaps& c) {
         L.idle_label_y = -8;
         L.show_kicker = false;
         L.pair_row = true;
-        L.title_font = &font_ui_bold_24;
+        L.title_font = &font_ui_bold_20;
         L.provider_font = &font_ui_bold_10;
         L.chip_font = &font_ui_bold_24;
         L.kicker_font = &font_ui_bold_10;
@@ -559,11 +560,44 @@ static void draw_rect_565(uint16_t* buf, int w, int h, int x0, int y0, int rw, i
     }
 }
 
+static void clear_canvas_565a8(uint8_t* buf, int w, int h) {
+    uint16_t* rgb = reinterpret_cast<uint16_t*>(buf);
+    uint8_t* alpha = buf + (w * h * 2);
+    memset(rgb, 0, (size_t)w * h * 2);
+    memset(alpha, 0, (size_t)w * h);
+}
+
+static void draw_rect_565a8(uint8_t* buf, int w, int h, int x0, int y0, int rw, int rh, uint16_t color) {
+    uint16_t* rgb = reinterpret_cast<uint16_t*>(buf);
+    uint8_t* alpha = buf + (w * h * 2);
+    for (int y = y0; y < y0 + rh; ++y) {
+        if (y < 0 || y >= h) continue;
+        for (int x = x0; x < x0 + rw; ++x) {
+            if (x < 0 || x >= w) continue;
+            const int idx = y * w + x;
+            rgb[idx] = color;
+            alpha[idx] = 255;
+        }
+    }
+}
+
+static void draw_square_565a8(uint8_t* buf, int w, int h, int cx, int cy, int size, uint16_t color) {
+    const int r = size / 2;
+    for (int y = cy - r; y <= cy + r; ++y) {
+        if (y < 0 || y >= h) continue;
+        for (int x = cx - r; x <= cx + r; ++x) {
+            if (x < 0 || x >= w) continue;
+            const int idx = y * w + x;
+            reinterpret_cast<uint16_t*>(buf)[idx] = color;
+            buf[w * h * 2 + idx] = 255;
+        }
+    }
+}
+
 static void render_hermes_header_icon(int mode, uint8_t phase) {
     if (pet_buffer_ready()) {
-        // ══ Pet face (still, first frame) ══
-        const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
-        for (int i = 0; i < 54 * 54; ++i) brand_canvas_buf[i] = bg;
+        // Transparent canvas; only pet pixels are opaque.
+        clear_canvas_565a8(brand_canvas_buf, 54, 54);
 
         const uint8_t* frame = pet_buffer_frame(0);
         if (frame) {
@@ -575,7 +609,7 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
                     int x1 = ((sx + 1) * 54) / 20;
                     int y0 = (sy * 54) / 20;
                     int y1 = ((sy + 1) * 54) / 20;
-                    draw_rect_565(brand_canvas_buf, 54, 54,
+                    draw_rect_565a8(brand_canvas_buf, 54, 54,
                         x0, y0, x1 - x0, y1 - y0,
                         pet_buffer_palette()[idx]);
                 }
@@ -586,13 +620,12 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
     }
 
     // ══ Fallback: Hermes logo (existing code below) ══
-    const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
     const uint16_t blue = make_rgb565(0x5a, 0x7a, 0xff);
     const uint16_t yellow = make_rgb565(0xff, 0xd5, 0x3d);
     const uint16_t body = make_rgb565(0xec, 0xe6, 0xdb);
     const uint16_t shade = make_rgb565(0xde, 0xda, 0xd0);
 
-    for (int i = 0; i < 54 * 54; ++i) brand_canvas_buf[i] = bg;
+    clear_canvas_565a8(brand_canvas_buf, 54, 54);
 
     for (int sy = 0; sy < 20; ++sy) {
         for (int sx = 0; sx < 20; ++sx) {
@@ -600,7 +633,7 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
             if (code == '0') continue;
             const int x = (sx * 27 + 5) / 10;
             const int y = (sy * 27 + 5) / 10;
-            draw_rect_565(brand_canvas_buf, 54, 54, x, y, 3, 3, code == '2' ? shade : body);
+            draw_rect_565a8(brand_canvas_buf, 54, 54, x, y, 3, 3, code == '2' ? shade : body);
         }
     }
 
@@ -608,7 +641,7 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
         for (int i = 0; i < 5; ++i) {
             const int ph = (phase + i * 8) % 40;
             if (ph >= 30) continue;
-            draw_square_565(brand_canvas_buf, 54, 54, 38 + i * 3, 10 + (ph * 24) / 40, ph < 20 ? 3 : 2, yellow);
+            draw_square_565a8(brand_canvas_buf, 54, 54, 38 + i * 3, 10 + (ph * 24) / 40, ph < 20 ? 3 : 2, yellow);
         }
     } else if (mode == 0) {
         static const int orbit[][2] = {
@@ -617,8 +650,8 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
         };
         const int a = phase % 12;
         const int b = (a + 6) % 12;
-        draw_square_565(brand_canvas_buf, 54, 54, orbit[a][0], orbit[a][1], 5, blue);
-        draw_square_565(brand_canvas_buf, 54, 54, orbit[b][0], orbit[b][1], 3, blue);
+        draw_square_565a8(brand_canvas_buf, 54, 54, orbit[a][0], orbit[a][1], 5, blue);
+        draw_square_565a8(brand_canvas_buf, 54, 54, orbit[b][0], orbit[b][1], 3, blue);
     }
 
     if (brand_canvas) lv_obj_invalidate(brand_canvas);
@@ -827,7 +860,7 @@ static void format_panel_meta_left(const UsagePanelData* panel, bool top, char* 
     }
 
     if (L.mode == LAYOUT_LANDSCAPE_SMALL && strcmp(panel->kind, "window_short") == 0) {
-        snprintf(buf, buf_size, "left_now");
+        snprintf(buf, buf_size, "now_left");
     } else if (L.mode == LAYOUT_LANDSCAPE_SMALL && strcmp(panel->kind, "window_long") == 0) {
         snprintf(buf, buf_size, "week_left");
     } else if (strcmp(panel->kind, "window_short") == 0) {
@@ -1005,6 +1038,9 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int y, lv_color_t accent, lv_obj_t**
 }
 
 static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, int y, lv_color_t accent) {
+    const int meta_label_y = L.meta_y - (L.mode == LAYOUT_LANDSCAPE_SMALL ? 2 : 0);
+    const int meta_dot_y = L.meta_y + (L.mode == LAYOUT_LANDSCAPE_SMALL ? 1 : 2);
+
     widgets->root = lv_obj_create(parent);
     lv_obj_set_pos(widgets->root, x, y);
     lv_obj_set_size(widgets->root, L.card_w, L.card_h);
@@ -1035,20 +1071,20 @@ static void init_panel_widgets(PanelWidgets* widgets, lv_obj_t* parent, int x, i
     lv_obj_set_style_bg_opa(widgets->meta_dot, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(widgets->meta_dot, 0, 0);
     lv_obj_set_style_radius(widgets->meta_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_pos(widgets->meta_dot, 0, L.meta_y + 2);
+    lv_obj_set_pos(widgets->meta_dot, 0, meta_dot_y);
 
     widgets->meta_left = lv_label_create(widgets->root);
     lv_obj_set_width(widgets->meta_left, L.card_w - L.card_pad_l - L.card_pad_r - L.meta_right_w - L.meta_dot - 12);
     lv_obj_set_style_text_font(widgets->meta_left, L.meta_font, 0);
     lv_obj_set_style_text_color(widgets->meta_left, COL_DIM, 0);
-    lv_obj_set_pos(widgets->meta_left, L.meta_dot + 6, L.meta_y);
+    lv_obj_set_pos(widgets->meta_left, L.meta_dot + 6, meta_label_y);
 
     widgets->meta_right = lv_label_create(widgets->root);
     lv_obj_set_width(widgets->meta_right, L.meta_right_w);
     lv_obj_set_style_text_font(widgets->meta_right, L.meta_font, 0);
     lv_obj_set_style_text_color(widgets->meta_right, COL_DIM, 0);
     lv_obj_set_style_text_align(widgets->meta_right, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(widgets->meta_right, LV_ALIGN_TOP_RIGHT, 0, L.meta_y);
+    lv_obj_align(widgets->meta_right, LV_ALIGN_TOP_RIGHT, 0, meta_label_y);
 }
 
 static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, bool top) {
@@ -1376,12 +1412,13 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_bg_opa(brand_chip, L.mode == LAYOUT_LANDSCAPE_SMALL ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(brand_chip, L.mode == LAYOUT_LANDSCAPE_SMALL ? 0 : 1, 0);
     lv_obj_set_style_border_color(brand_chip, COL_BLUE, 0);
+    lv_obj_set_style_border_opa(brand_chip, L.mode == LAYOUT_LANDSCAPE_SMALL ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     lv_obj_set_style_radius(brand_chip, L.chip_radius, 0);
     lv_obj_set_style_pad_all(brand_chip, 0, 0);
     lv_obj_clear_flag(brand_chip, LV_OBJ_FLAG_SCROLLABLE);
 
     brand_canvas = lv_canvas_create(brand_chip);
-    lv_canvas_set_buffer(brand_canvas, brand_canvas_buf, 54, 54, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_set_buffer(brand_canvas, brand_canvas_buf, 54, 54, LV_COLOR_FORMAT_RGB565A8);
     lv_obj_center(brand_canvas);
 
     brand_chip_label = lv_label_create(brand_chip);
@@ -1424,10 +1461,10 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(agent_badge, L.agent_x, L.agent_y);
     lv_obj_set_size(agent_badge, L.agent_size, L.agent_size);
     lv_obj_set_style_bg_color(agent_badge, COL_GREEN, 0);
-    lv_obj_set_style_bg_opa(agent_badge, (lv_opa_t)34, 0);
+    lv_obj_set_style_bg_opa(agent_badge, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)42 : (lv_opa_t)34, 0);
     lv_obj_set_style_border_width(agent_badge, 1, 0);
     lv_obj_set_style_border_color(agent_badge, COL_GREEN, 0);
-    lv_obj_set_style_border_opa(agent_badge, (lv_opa_t)74, 0);
+    lv_obj_set_style_border_opa(agent_badge, L.mode == LAYOUT_LANDSCAPE_SMALL ? (lv_opa_t)96 : (lv_opa_t)74, 0);
     lv_obj_set_style_radius(agent_badge, 7, 0);
     lv_obj_set_style_shadow_width(agent_badge, 0, 0);
     lv_obj_clear_flag(agent_badge, LV_OBJ_FLAG_SCROLLABLE);

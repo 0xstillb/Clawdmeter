@@ -1,5 +1,6 @@
 #include "ble.h"
 #include "pet_buffer.h"
+#include "ui.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
