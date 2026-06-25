@@ -1025,14 +1025,20 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     }
 
     int pct = static_cast<int>(panel->pct + 0.5f);
-    lv_label_set_text_fmt(widgets->pct, "%d%%", pct);
-    lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
 
-    // ── prepaid: bar shows remaining balance (high = good) ──────────
-    int bar_pct = pct;
-    if (is_prepaid && top && strcmp(panel->kind, "wallet_depletion") == 0) {
-        bar_pct = pct;  // remaining %, bar fill = remaining balance
+    // ── prepaid top card: show balance amount (e.g. "55.00 CNY") ──
+    const bool prepaid_top = (is_prepaid && top && strcmp(panel->kind, "wallet_depletion") == 0);
+    if (prepaid_top) {
+        lv_label_set_text(widgets->pct, panel->subtext[0] ? panel->subtext : "---");
+        lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
+    } else {
+        lv_label_set_text_fmt(widgets->pct, "%d%%", pct);
+        lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     }
+
+    // ── bar: remaining % for prepaid top, pct% for everything else ──
+    int bar_pct = prepaid_top ? pct : pct;
+    // prepaid top bar already shows remaining (pct=remaining from daemon)
 
     if (widgets->bar_fill) {
         const int track_w = L.card_w - L.card_pad_l - L.card_pad_r;
@@ -1045,6 +1051,10 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     }
     lv_label_set_text(widgets->meta_left, meta_left);
     format_panel_meta_right(panel, meta_right, sizeof(meta_right));
+    // ── prepaid top: show remaining % in meta, not the balance amount ──
+    if (prepaid_top) {
+        snprintf(meta_right, sizeof(meta_right), "%d%% left", pct);
+    }
     lv_label_set_text(widgets->meta_right, meta_right);
 }
 
