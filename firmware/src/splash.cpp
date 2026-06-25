@@ -28,6 +28,9 @@ static uint32_t last_pick_ms = 0;
 static bool active = false;
 static uint8_t splash_phase = 0;
 
+// Prepaid balance override (-1 = use rate-based picking)
+static int g_prepaid_balance = -1;
+
 // While splash is showing, auto-cycle to the next animation in the current
 // rate-driven group every this many ms.
 #define SPLASH_ROTATE_INTERVAL_MS 20000
@@ -262,10 +265,31 @@ void splash_pick_for_current_rate(void) {
     render_hermes_splash();
 }
 
+void splash_pick_for_prepaid(int balance_pct) {
+    // Map remaining balance % → Hermes animation (0=Idle, 3=Heavy)
+    uint16_t anim;
+    if (balance_pct >= 75)      anim = 0;  // plenty → rest
+    else if (balance_pct >= 50) anim = 1;  // ok → normal
+    else if (balance_pct >= 25) anim = 2;  // low → active
+    else                        anim = 3;  // critical → heavy
+    cur_anim = anim;
+    frame_started_ms = millis();
+    last_pick_ms = frame_started_ms;
+    render_hermes_splash();
+}
+
+void splash_set_prepaid_balance(int balance_pct) {
+    g_prepaid_balance = balance_pct;
+}
+
 bool splash_is_active(void) { return active; }
 
 void splash_show(void) {
-    splash_pick_for_current_rate();
+    if (g_prepaid_balance >= 0) {
+        splash_pick_for_prepaid(g_prepaid_balance);
+    } else {
+        splash_pick_for_current_rate();
+    }
     if (splash_container) lv_obj_clear_flag(splash_container, LV_OBJ_FLAG_HIDDEN);
     active = true;
 }

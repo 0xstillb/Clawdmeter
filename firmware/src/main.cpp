@@ -524,18 +524,18 @@ void loop() {
             int g_before = usage_rate_group();
             float rate_pct = usage.top.pct;
             if (strcmp(usage.plan_type, "prepaid") == 0) {
-                // Prepaid: top.pct is daily spend % — use directly
-                // (already consumption rate, no inversion needed)
+                // Prepaid: animation follows remaining balance level
+                splash_set_prepaid_balance((int)usage.bottom.pct);
             } else {
                 // Subscription: top.pct is remaining % — invert to get used %
                 rate_pct = 100.0f - rate_pct;
-            }
-            usage_rate_sample(rate_pct);
-            int g_after = usage_rate_group();
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.top.pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
+                usage_rate_sample(rate_pct);
+                int g_after = usage_rate_group();
+                if (g_after != g_before) {
+                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                        g_before, g_after, usage.top.pct);
+                    if (splash_is_active()) splash_pick_for_current_rate();
+                }
             }
             ui_update(&usage);
             ble_send_ack();

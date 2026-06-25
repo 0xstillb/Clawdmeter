@@ -19,6 +19,14 @@ void splash_hide(void);
 // Pick the Hermes splash mode that matches the current usage-rate group.
 void splash_pick_for_current_rate(void);
 
+// Pick the Hermes splash mode based on remaining prepaid balance (%).
+//   balance_pct 0-100: 0=empty, 100=fully topped up.
+void splash_pick_for_prepaid(int balance_pct);
+
+// Set prepaid balance for auto-picking on next splash_show().
+// Pass -1 to revert to rate-based picking.
+void splash_set_prepaid_balance(int balance_pct);
+
 // True when splash is currently rendering (used to gate re-picks).
 bool splash_is_active(void);
 
