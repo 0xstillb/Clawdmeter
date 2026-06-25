@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""OpenCode Zen provider plugin for Clawdmeter.
+
+OpenCode Zen is a **prepaid balance** provider ($20 increments).
+
+Fetches balance from the proposed ``GET /zen/v1/balance`` API.  Falls
+back to dashboard scraping when the API endpoint returns a 404.
+
+UI Layout:
+  - Top card: Daily spend ($ amount + % of day's balance used)
+  - Bottom card: Remaining balance ($ amount)
+
+Credentials:
+  1. ZEN_API_KEY env var
+  2. ZEN_WORKSPACE_ID env var (for dashboard scraping fallback)
+  3. ~/.config/clawdmeter/zen-credentials.json (keys: api_key, workspace_id)
+
+Daily spend is tracked via a local state file at
+~/.config/clawdmeter/zen-state.json.
+
+Dependencies: httpx
+Protocol: DAEMON_PLUGIN_PROTOCOL.md
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from datetime import date
+from pathlib import Path
+
+# Add repo root so imports work when run standalone
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import httpx
+
+from daemon.plugin_protocol import PluginRequest, PluginResponse
+from daemon.payloads import build_zen_usage_payload
+
+# ── constants ───────────────────────────────────────────────────────────────
+
+ZEN_BALANCE_API = "https://opencode.ai/zen/v1/balance"
+ZEN_DASHBOARD_URL = "https://opencode.ai/workspace/{workspace_id}/zen"
+_USER_AGENT = "clawdmeter/1.0"
+_TIMEOUT = 20.0
+_STATE_DIR = Path.home() / ".config" / "clawdmeter"
+_STATE_FILE = _STATE_DIR / "zen-state.json"
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _debug(*args: object) -> None:
+    if "--debug" in sys.argv:
+        print("[zen]", *args, file=sys.stderr)
+
+
+def _read_credentials() -> dict | None:
+    api_key = os.environ.get("ZEN_API_KEY", "").strip()
+    workspace_id = os.environ.get("ZEN_WORKSPACE_ID", "").strip()
+
+    if api_key:
+        _debug("using env ZEN_API_KEY")
+        return {"api_key": api_key, "workspace_id": workspace_id}
+
+    config_paths = [_STATE_DIR / "zen-credentials.json"]
+    for path in config_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        api_key = data.get("api_key", "").strip()
+        if not api_key:
+            continue
+        workspace_id = data.get("workspace_id", "").strip() or workspace_id
+        _debug(f"using credentials from {path}")
+        return {"api_key": api_key, "workspace_id": workspace_id}
+    return None
+
+
+def _is_auth_failure(msg: str | None) -> bool:
+    if not msg:
+        return False
+    lowered = msg.lower()
+    return "api key" in lowered or "not configured" in lowered or "401" in msg or "403" in msg
+
+
+# ── daily spend tracking ────────────────────────────────────────────────────
+
+
+def _read_state() -> dict | None:
+    try:
+        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_state(state: dict) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _minutes_until_midnight() -> int:
+    import datetime as dt
+    now = dt.datetime.now()
+    tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    return int((tomorrow - now).total_seconds() / 60)
+
+
+def _compute_daily_spend(current_balance: float) -> dict:
+    today = str(date.today())
+    state = _read_state()
+
+    if state is None or state.get("date") != today:
+        _debug(f"resetting daily tracking for {today}")
+        _write_state({"date": today, "start_balance": current_balance})
+        return {"daily_spent": 0.0, "daily_spent_pct": 0, "reset_mins": _minutes_until_midnight()}
+
+    start_balance = float(state.get("start_balance", current_balance))
+    daily_spent = max(0.0, start_balance - current_balance)
+    daily_spent_pct = 0
+    if start_balance > 0:
+        daily_spent_pct = min(100, int(round(daily_spent / start_balance * 100)))
+
+    _write_state({"date": today, "start_balance": start_balance, "last_balance": current_balance})
+    return {"daily_spent": daily_spent, "daily_spent_pct": daily_spent_pct, "reset_mins": _minutes_until_midnight()}
+
+
+# ── balance fetch ───────────────────────────────────────────────────────────
+
+
+async def _fetch_balance_api(api_key: str) -> dict | None:
+    """Try the proposed Zen balance API."""
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": _USER_AGENT,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
+            resp = await http.get(ZEN_BALANCE_API, headers=headers)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "balance" in data:
+                _debug(f"balance API returned {data.get('balance')}")
+                return data
+        _debug(f"balance API returned HTTP {resp.status_code}, falling back to scrape")
+    except (httpx.HTTPError, json.JSONDecodeError) as e:
+        _debug(f"balance API failed: {e}")
+    return None
+
+
+async def _scrape_dashboard(workspace_id: str, api_key: str) -> float | None:
+    """Fallback: scrape Zen dashboard for balance."""
+    if not workspace_id:
+        return None
+    url = ZEN_DASHBOARD_URL.format(workspace_id=workspace_id)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Cookie": f"auth={api_key}",
+        "User-Agent": _USER_AGENT,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
+            resp = await http.get(url, headers=headers)
+        if resp.status_code >= 400:
+            _debug(f"dashboard scrape HTTP {resp.status_code}")
+            return None
+        # Look for balance patterns in the page
+        patterns = [
+            r'balance["\']?\s*:\s*["\']?([\d.]+)',
+            r'Balance["\']?\s*:\s*["\']?\$?([\d.]+)',
+            r'credit["\']?\s*:\s*["\']?([\d.]+)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, resp.text)
+            if m:
+                try:
+                    return float(m.group(1))
+                except ValueError:
+                    continue
+        _debug("no balance pattern found in dashboard")
+        return None
+    except httpx.HTTPError as e:
+        _debug(f"dashboard scrape failed: {e}")
+        return None
+
+
+# ── main poll logic ─────────────────────────────────────────────────────────
+
+
+async def poll() -> PluginResponse:
+    req = PluginRequest.from_stdin()
+    _debug(f"request: action={req.action}, last_error={req.last_error!r}")
+
+    # ── credentials ────────────────────────────────────────────────────
+    creds = _read_credentials()
+    if creds is None:
+        return PluginResponse.failure(
+            "Zen: API key not configured — set ZEN_API_KEY env var "
+            "or create ~/.config/clawdmeter/zen-credentials.json",
+            retry=False,
+        )
+
+    api_key = creds.get("api_key", "")
+    workspace_id = creds.get("workspace_id", "")
+    if not api_key:
+        return PluginResponse.failure("Zen: API key is empty", retry=False)
+
+    if _is_auth_failure(req.last_error):
+        _debug("repeated auth failure, returning retry:false")
+        return PluginResponse.failure(
+            "Zen: API key invalid — please update your credentials", retry=False
+        )
+
+    # ── fetch balance ──────────────────────────────────────────────────
+    balance_data = await _fetch_balance_api(api_key)
+
+    if balance_data is None:
+        # Fallback to dashboard scraping
+        if workspace_id:
+            _debug("attempting dashboard scrape")
+            balance_val = await _scrape_dashboard(workspace_id, api_key)
+            if balance_val is not None:
+                balance_data = {"balance": balance_val, "currency": "USD"}
+        if balance_data is None:
+            return PluginResponse.failure(
+                "Zen: unable to fetch balance (API + dashboard scrape both failed)",
+                retry=True,
+            )
+
+    # ── extract balance ────────────────────────────────────────────────
+    balance = float(balance_data.get("balance", 0) or 0)
+    currency = str(balance_data.get("currency", "USD") or "USD")
+
+    # ── compute daily spend ────────────────────────────────────────────
+    daily = _compute_daily_spend(balance)
+
+    # ── build and return payload ───────────────────────────────────────
+    payload = build_zen_usage_payload(
+        balance_data, now=time.time(),
+        daily_spent=daily["daily_spent"],
+        daily_spent_pct=daily["daily_spent_pct"],
+        daily_reset_mins=daily["reset_mins"],
+    )
+    return PluginResponse.success(payload)
+
+
+async def main() -> None:
+    result = await poll()
+    print(result.to_json())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

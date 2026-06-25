@@ -55,9 +55,11 @@ def _reset_minutes_from_window(window: Mapping[str, object], now: float) -> int:
 
 def build_provider_payload(*, provider: str, mode: str, top: dict, bottom: dict,
                            status: str = "unknown", ok: bool = True,
+                           plan_type: str = "subscription",
                            legacy_aliases: dict | None = None) -> dict:
     payload = {
         "p": provider,
+        "plan_type": plan_type,
         "mode": mode,
         "top": top,
         "bottom": bottom,
@@ -268,6 +270,7 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
     return build_provider_payload(
         provider="deepseek",
         mode="prepaid",
+        plan_type="prepaid",
         # Top card: daily spend ($ amount + % of day budget)
         top={
             "label": "Today",
@@ -302,6 +305,7 @@ def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
     return build_provider_payload(
         provider="deepseek",
         mode="prepaid",
+        plan_type="prepaid",
         top={
             "label": "Today",
             "kind": "budget_daily",
@@ -321,6 +325,155 @@ def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
         status="unknown",
         ok=False,
         legacy_aliases={"s": 0, "sr": 0, "w": 0, "wr": 1440},
+    )
+
+
+# ── Generic prepaid helper ──────────────────────────────────────────────
+
+
+def _prepaid_remaining_pct(total: float, used: float) -> int:
+    """Compute remaining percentage from total and used amounts."""
+    if total > 0 and used >= 0:
+        remaining = max(0, total - used)
+        return max(0, min(100, int(round(remaining / total * 100))))
+    return 100
+
+
+def _prepaid_status(remaining_pct: int, is_available: bool = True) -> str:
+    """Derive status string from remaining percentage."""
+    if not is_available:
+        return "limited"
+    if remaining_pct <= 10:
+        return "limited"
+    if remaining_pct <= 25:
+        return "warning"
+    return "allowed"
+
+
+# ── OpenRouter payload builder ──────────────────────────────────────────
+
+
+def build_openrouter_usage_payload(key_data: dict, *, now: float | None = None,
+                                    daily_spent: float = 0,
+                                    daily_spent_pct: int = 0,
+                                    daily_reset_mins: int = 1440) -> dict:
+    """Build a BLE payload from OpenRouter auth/key API data (prepaid).
+
+    OpenRouter is a credits-based prepaid system.  Key info from
+    ``GET /api/v1/auth/key``::
+
+        {
+            "data": {
+                "usage": 42.50,
+                "limit": 100.00,
+                "is_free": false,
+                ...
+            }
+        }
+
+    ``usage`` = credits consumed, ``limit`` = total credits purchased.
+    """
+    data = key_data.get("data") if isinstance(key_data, dict) else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    usage = float(data.get("usage", 0) or 0)
+    limit = float(data.get("limit", 0) or 0)
+    remaining_pct = _prepaid_remaining_pct(limit, usage)
+    remaining_credits = max(0, limit - usage)
+
+    status = _prepaid_status(remaining_pct)
+
+    return build_provider_payload(
+        provider="openrouter",
+        mode="prepaid",
+        plan_type="prepaid",
+        top={
+            "label": "Today",
+            "kind": "budget_daily",
+            "pct": daily_spent_pct,
+            "reset_mins": daily_reset_mins,
+            "has_reset": daily_reset_mins > 0,
+            "subtext": f"{daily_spent:.2f} credits spent" if daily_spent > 0 else "no spend",
+        },
+        bottom={
+            "label": "Credits",
+            "kind": "wallet_depletion",
+            "pct": remaining_pct,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": f"{remaining_credits:.2f} credits",
+        },
+        status=status,
+        ok=True,
+        legacy_aliases={
+            "s": remaining_pct,
+            "sr": 0,
+            "w": daily_spent_pct,
+            "wr": daily_reset_mins,
+        },
+    )
+
+
+# ── Zen payload builder ────────────────────────────────────────────────
+
+
+def build_zen_usage_payload(balance_data: dict, *, now: float | None = None,
+                             daily_spent: float = 0,
+                             daily_spent_pct: int = 0,
+                             daily_reset_mins: int = 1440) -> dict:
+    """Build a BLE payload from OpenCode Zen balance data (prepaid).
+
+    OpenCode Zen is a prepaid balance system ($20 increments).
+
+    Attempts the proposed API ``GET /zen/v1/balance`` first::
+
+        {
+            "balance": 42.50,
+            "currency": "USD"
+        }
+
+    Falls back to parsing scraped dashboard data with ``balance`` key.
+    """
+    if not isinstance(balance_data, dict):
+        balance_data = {}
+
+    balance = float(balance_data.get("balance", 0) or 0)
+    currency = str(balance_data.get("currency", "USD") or "USD")
+
+    # Without a configured total, treat balance itself as the "budget"
+    remaining_pct = min(100, int(balance)) if balance > 0 else 0
+
+    status = _prepaid_status(remaining_pct)
+
+    return build_provider_payload(
+        provider="zen",
+        mode="prepaid",
+        plan_type="prepaid",
+        top={
+            "label": "Today",
+            "kind": "budget_daily",
+            "pct": daily_spent_pct,
+            "reset_mins": daily_reset_mins,
+            "has_reset": daily_reset_mins > 0,
+            "subtext": f"{daily_spent:.2f} {currency} spent" if daily_spent > 0 else "no spend",
+        },
+        bottom={
+            "label": "Balance",
+            "kind": "wallet_depletion",
+            "pct": remaining_pct,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": f"{balance:.2f} {currency}",
+        },
+        status=status,
+        ok=True,
+        legacy_aliases={
+            "s": remaining_pct,
+            "sr": 0,
+            "w": daily_spent_pct,
+            "wr": daily_reset_mins,
+        },
     )
 
 

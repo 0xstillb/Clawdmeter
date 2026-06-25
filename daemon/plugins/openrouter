@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""OpenRouter provider plugin for Clawdmeter.
+
+OpenRouter is a **prepaid credits** provider.  Fetches key info from
+``GET /api/v1/auth/key`` and computes remaining credits.
+
+UI Layout:
+  - Top card: Daily credit spend ($ amount + % of day's credits)
+  - Bottom card: Remaining credits ($ amount)
+
+Credentials: OPENROUTER_API_KEY env var or
+~/.config/clawdmeter/openrouter-credentials.json (key: api_key)
+
+Daily spend is tracked via a local state file at
+~/.config/clawdmeter/openrouter-state.json.
+
+Dependencies: httpx
+Protocol: DAEMON_PLUGIN_PROTOCOL.md
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import time
+from datetime import date
+from pathlib import Path
+
+# Add repo root so imports work when run standalone
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import httpx
+
+from daemon.plugin_protocol import PluginRequest, PluginResponse
+from daemon.payloads import build_openrouter_usage_payload
+
+# ── constants ───────────────────────────────────────────────────────────────
+
+OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/auth/key"
+_USER_AGENT = "clawdmeter/1.0"
+_TIMEOUT = 20.0
+_STATE_DIR = Path.home() / ".config" / "clawdmeter"
+_STATE_FILE = _STATE_DIR / "openrouter-state.json"
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _debug(*args: object) -> None:
+    if "--debug" in sys.argv:
+        print("[openrouter]", *args, file=sys.stderr)
+
+
+def _read_credentials() -> dict | None:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if api_key:
+        _debug("using env OPENROUTER_API_KEY")
+        return {"api_key": api_key}
+
+    config_paths = [_STATE_DIR / "openrouter-credentials.json"]
+    for path in config_paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        api_key = data.get("api_key", "").strip()
+        if api_key:
+            _debug(f"using credentials from {path}")
+            return {"api_key": api_key}
+    return None
+
+
+def _is_auth_failure(msg: str | None) -> bool:
+    if not msg:
+        return False
+    lowered = msg.lower()
+    return "api key" in lowered or "not configured" in lowered or "401" in msg or "403" in msg
+
+
+# ── daily spend tracking ────────────────────────────────────────────────────
+
+
+def _read_state() -> dict | None:
+    try:
+        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_state(state: dict) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _minutes_until_midnight() -> int:
+    import datetime as dt
+    now = dt.datetime.now()
+    tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    return int((tomorrow - now).total_seconds() / 60)
+
+
+def _compute_daily_spend(current_credits: float) -> dict:
+    today = str(date.today())
+    state = _read_state()
+
+    if state is None or state.get("date") != today:
+        _debug(f"resetting daily tracking for {today}")
+        _write_state({"date": today, "start_balance": current_credits})
+        return {"daily_spent": 0.0, "daily_spent_pct": 0, "reset_mins": _minutes_until_midnight()}
+
+    start_balance = float(state.get("start_balance", current_credits))
+    daily_spent = max(0.0, start_balance - current_credits)
+    daily_spent_pct = 0
+    if start_balance > 0:
+        daily_spent_pct = min(100, int(round(daily_spent / start_balance * 100)))
+
+    _write_state({"date": today, "start_balance": start_balance, "last_balance": current_credits})
+    return {"daily_spent": daily_spent, "daily_spent_pct": daily_spent_pct, "reset_mins": _minutes_until_midnight()}
+
+
+# ── main poll logic ─────────────────────────────────────────────────────────
+
+
+async def poll() -> PluginResponse:
+    req = PluginRequest.from_stdin()
+    _debug(f"request: action={req.action}, last_error={req.last_error!r}")
+
+    # ── credentials ────────────────────────────────────────────────────
+    creds = _read_credentials()
+    if creds is None:
+        return PluginResponse.failure(
+            "OpenRouter: API key not configured — set OPENROUTER_API_KEY env var "
+            "or create ~/.config/clawdmeter/openrouter-credentials.json",
+            retry=False,
+        )
+
+    api_key = creds.get("api_key", "")
+    if not api_key:
+        return PluginResponse.failure("OpenRouter: API key is empty", retry=False)
+
+    if _is_auth_failure(req.last_error):
+        _debug("repeated auth failure, returning retry:false")
+        return PluginResponse.failure(
+            "OpenRouter: API key invalid — please update your credentials", retry=False
+        )
+
+    # ── fetch key info ─────────────────────────────────────────────────
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": _USER_AGENT,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
+            resp = await http.get(OPENROUTER_KEY_URL, headers=headers)
+    except httpx.HTTPError as e:
+        _debug(f"HTTP request failed: {e}")
+        return PluginResponse.failure(f"OpenRouter: Network error: {e}", retry=True)
+
+    if resp.status_code in (401, 403):
+        _debug(f"auth failed (HTTP {resp.status_code})")
+        return PluginResponse.failure(
+            f"OpenRouter: auth failed (HTTP {resp.status_code}) — API key may be invalid",
+            retry=False,
+        )
+
+    if resp.status_code >= 400:
+        _debug(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        return PluginResponse.failure(f"OpenRouter: HTTP {resp.status_code}", retry=True)
+
+    try:
+        body = resp.json()
+    except json.JSONDecodeError:
+        return PluginResponse.failure("OpenRouter: API returned invalid JSON", retry=True)
+
+    if not isinstance(body, dict):
+        return PluginResponse.failure("OpenRouter: unexpected response format", retry=True)
+
+    # ── extract usage from response ────────────────────────────────────
+    data = body.get("data") if isinstance(body, dict) else {}
+    if not isinstance(data, dict):
+        return PluginResponse.failure("OpenRouter: unexpected data format", retry=True)
+
+    limit = float(data.get("limit", 0) or 0)
+    usage = float(data.get("usage", 0) or 0)
+    remaining = max(0, limit - usage)
+
+    # ── compute daily spend ────────────────────────────────────────────
+    daily = _compute_daily_spend(remaining)
+
+    # ── build and return payload ───────────────────────────────────────
+    payload = build_openrouter_usage_payload(
+        body, now=time.time(),
+        daily_spent=daily["daily_spent"],
+        daily_spent_pct=daily["daily_spent_pct"],
+        daily_reset_mins=daily["reset_mins"],
+    )
+    return PluginResponse.success(payload)
+
+
+async def main() -> None:
+    result = await poll()
+    print(result.to_json())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

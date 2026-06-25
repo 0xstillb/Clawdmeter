@@ -19,8 +19,10 @@ preference.
 | `claude` | Anthropic Claude | Python | httpx |
 | `codex` | OpenAI Codex | Python | httpx |
 | `go` | OpenCode Go | Python | httpx |
-| `deepseek` | DeepSeek | Python | httpx |
+| `deepseek` | DeepSeek (prepaid) | Python | httpx |
 | `minimax` | MiniMax | Python | httpx |
+| `openrouter` | OpenRouter (prepaid) | Python | httpx |
+| `zen` | OpenCode Zen (prepaid) | Python | httpx |
 
 ## Protocol overview
 
