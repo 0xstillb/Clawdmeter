@@ -523,10 +523,9 @@ void loop() {
         if (usage_parse_json(ble_get_data(), &usage)) {
             int g_before = usage_rate_group();
             float rate_pct = usage.top.pct;
-            if (usage.provider == USAGE_PROVIDER_CODEX ||
-                usage.provider == USAGE_PROVIDER_GO) {
-                rate_pct = 100.0f - rate_pct;
-            }
+            // All subscription/prepaid providers send remaining %,
+            // so invert for the rate animation (high consumption = intense)
+            rate_pct = 100.0f - rate_pct;
             usage_rate_sample(rate_pct);
             int g_after = usage_rate_group();
             if (g_after != g_before) {

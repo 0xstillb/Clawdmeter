@@ -112,6 +112,9 @@ def build_claude_usage_payload(headers: Mapping[str, str], *, now: float) -> dic
     session_reset = _reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset"), now)
     weekly_pct = _pct(hdr("anthropic-ratelimit-unified-7d-utilization"))
     weekly_reset = _reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset"), now)
+    # ── convert to remaining % ──────────────────────────────────────
+    session_pct = 100 - session_pct
+    weekly_pct = 100 - weekly_pct
     status = hdr("anthropic-ratelimit-unified-5h-status", "unknown")
 
     return build_windowed_payload(
@@ -344,25 +347,30 @@ def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict
     if not isinstance(usage, dict):
         usage = {}
 
-    # ── rate-limit utilization (short window) ───────────────────────
-    rate_pct = _int_pct(usage.get("rate_limit_pct", 0))
+    # ── rate-limit remaining (short window) ──────────────────────────
+    rate_used = _int_pct(usage.get("rate_limit_pct", 0))
+    rate_pct = 100 - rate_used
     reset_after = int(usage.get("rate_limit_reset_seconds", 60))
     rate_reset_mins = int(round(reset_after / 60)) if reset_after > 0 else 1
 
-    # ── daily token usage (long window) ─────────────────────────────
-    daily_pct = _int_pct(usage.get("daily_usage_pct", 0))
+    # ── daily token remaining (long window) ──────────────────────────
+    daily_used = _int_pct(usage.get("daily_usage_pct", 0))
+    daily_pct = 100 - daily_used
     daily_limit = _int_pct(usage.get("daily_limit", 0))
     daily_reset_mins = 1440  # ~24 hours
 
-    # If we only have raw token counts, compute a rough percentage
-    if daily_pct == 0 and daily_limit > 0:
+    # If we only have raw token counts, compute remaining from there
+    had_daily_pct = bool(usage.get("daily_usage_pct"))
+    if not had_daily_pct and daily_limit > 0:
         total_tokens = _int_pct(usage.get("total_tokens", 0))
-        daily_pct = int(round(total_tokens / max(daily_limit, 1) * 100))
+        used = int(round(total_tokens / max(daily_limit, 1) * 100))
+        daily_pct = 100 - used
 
+    # ── status: remaining low → warning/limited ─────────────────────
     status = "allowed"
-    if daily_pct >= 90 or rate_pct >= 90:
+    if daily_used >= 90 or rate_used >= 90:
         status = "limited"
-    elif daily_pct >= 75 or rate_pct >= 75:
+    elif daily_used >= 75 or rate_used >= 75:
         status = "warning"
 
     return build_windowed_payload(
