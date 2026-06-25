@@ -205,6 +205,125 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     )
 
 
+def build_deepseek_usage_payload(headers: Mapping[str, str], *, now: float) -> dict:
+    """Build a BLE payload from DeepSeek API rate-limit headers.
+
+    DeepSeek returns per-minute rate-limit headers on every API response:
+      - X-RateLimit-Limit-Requests  (max requests per minute)
+      - X-RateLimit-Remaining-Requests  (remaining in this minute window)
+      - X-RateLimit-Reset-Requests  (seconds until reset)
+
+    Also uses X-RateLimit-Limit-Tokens / X-RateLimit-Remaining-Tokens when
+    available for a token-based view.  Falls back to requests-based when
+    token headers are absent.
+
+    Mapping: top card = requests/utilization (short window, per-minute),
+             bottom card = token utilization (longer view).
+    """
+    current_time = time.time() if now is None else now
+
+    def hdr(name: str, default: str = "0") -> str:
+        return headers.get(name, default)
+
+    # ── request-based (short window) ─────────────────────────────────
+    req_limit = _int_pct(hdr("x-ratelimit-limit-requests", "60"))
+    req_remaining = _int_pct(hdr("x-ratelimit-remaining-requests", "0"))
+    req_reset_sec = _int_pct(hdr("x-ratelimit-reset-requests", "60"))
+    req_pct = 100 - int(round(req_remaining / max(req_limit, 1) * 100)) if req_limit > 0 else 0
+    req_reset_mins = int(round(req_reset_sec / 60)) if req_reset_sec > 0 else 0
+
+    # ── token-based (long window) ───────────────────────────────────
+    tok_limit = _int_pct(hdr("x-ratelimit-limit-tokens", "0"))
+    tok_remaining = _int_pct(hdr("x-ratelimit-remaining-tokens", "0"))
+    tok_reset_sec = _int_pct(hdr("x-ratelimit-reset-tokens", "0"))
+    has_token_headers = tok_limit > 0
+
+    if has_token_headers:
+        tok_pct = 100 - int(round(tok_remaining / max(tok_limit, 1) * 100)) if tok_limit > 0 else 0
+        tok_reset_mins = int(round(tok_reset_sec / 60)) if tok_reset_sec > 0 else 0
+    else:
+        tok_pct = req_pct
+        tok_reset_mins = req_reset_mins
+
+    status = "allowed"
+    if tok_pct >= 90 or req_pct >= 90:
+        status = "limited"
+    elif tok_pct >= 75 or req_pct >= 75:
+        status = "warning"
+
+    return build_windowed_payload(
+        provider="deepseek",
+        top_pct=req_pct,
+        top_reset_mins=req_reset_mins,
+        bottom_pct=tok_pct,
+        bottom_reset_mins=tok_reset_mins,
+        status=status,
+        top_has_reset=req_reset_mins > 0,
+        bottom_has_reset=tok_reset_mins > 0,
+        top_subtext="requests/min" if req_reset_mins <= 0 else None,
+        bottom_subtext="tokens/min" if not has_token_headers else None,
+    )
+
+
+def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict:
+    """Build a BLE payload from MiniMax API usage data.
+
+    MiniMax returns usage info in the response body under ``usage``:
+      {
+        "usage": {
+          "total_tokens": N,
+          "prompt_tokens": N,
+          "completion_tokens": N,
+          "daily_usage_pct": 45,       # optional — percentage of daily limit used
+          "daily_limit": 1000000,
+          "rate_limit_pct": 12          # optional — current rate-limit utilization
+        }
+      }
+
+    Mapping:
+      - Top card (window_short) → rate-limit utilization (per-minute)
+      - Bottom card (window_long) → daily token usage
+    """
+    current_time = time.time() if now is None else now
+    usage = data.get("usage") or data if isinstance(data, dict) else {}
+    if not isinstance(usage, dict):
+        usage = {}
+
+    # ── rate-limit utilization (short window) ───────────────────────
+    rate_pct = _int_pct(usage.get("rate_limit_pct", 0))
+    reset_after = int(usage.get("rate_limit_reset_seconds", 60))
+    rate_reset_mins = int(round(reset_after / 60)) if reset_after > 0 else 1
+
+    # ── daily token usage (long window) ─────────────────────────────
+    daily_pct = _int_pct(usage.get("daily_usage_pct", 0))
+    daily_limit = _int_pct(usage.get("daily_limit", 0))
+    daily_reset_mins = 1440  # ~24 hours
+
+    # If we only have raw token counts, compute a rough percentage
+    if daily_pct == 0 and daily_limit > 0:
+        total_tokens = _int_pct(usage.get("total_tokens", 0))
+        daily_pct = int(round(total_tokens / max(daily_limit, 1) * 100))
+
+    status = "allowed"
+    if daily_pct >= 90 or rate_pct >= 90:
+        status = "limited"
+    elif daily_pct >= 75 or rate_pct >= 75:
+        status = "warning"
+
+    return build_windowed_payload(
+        provider="minimax",
+        top_pct=rate_pct,
+        top_reset_mins=rate_reset_mins,
+        bottom_pct=daily_pct,
+        bottom_reset_mins=daily_reset_mins,
+        status=status,
+        top_has_reset=True,
+        bottom_has_reset=True,
+        top_subtext="rate limit" if rate_pct == 0 else None,
+        bottom_subtext="daily limit" if daily_pct == 0 else None,
+    )
+
+
 def build_codex_usage_payload(payload: Mapping[str, object], *, now: float | None = None) -> dict:
     rate_limit = payload.get("rate_limit") or {}
     if not isinstance(rate_limit, Mapping):

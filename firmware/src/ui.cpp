@@ -731,6 +731,8 @@ static const char* provider_text(UsageProvider provider) {
         case USAGE_PROVIDER_OPENROUTER: return "OPENROUTER";
         case USAGE_PROVIDER_ZEN: return "ZEN";
         case USAGE_PROVIDER_GO: return "OPENCODE GO";
+        case USAGE_PROVIDER_DEEPSEEK: return "DEEPSEEK";
+        case USAGE_PROVIDER_MINIMAX: return "MINIMAX";
         default: return "NO DATA";
     }
 }

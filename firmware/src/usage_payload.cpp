@@ -195,6 +195,8 @@ static UsageProvider provider_from_text(const char* provider) {
     if (strcmp(provider, "openrouter") == 0) return USAGE_PROVIDER_OPENROUTER;
     if (strcmp(provider, "zen") == 0) return USAGE_PROVIDER_ZEN;
     if (strcmp(provider, "go") == 0) return USAGE_PROVIDER_GO;
+    if (strcmp(provider, "deepseek") == 0) return USAGE_PROVIDER_DEEPSEEK;
+    if (strcmp(provider, "minimax") == 0) return USAGE_PROVIDER_MINIMAX;
     return USAGE_PROVIDER_UNKNOWN;
 }
 

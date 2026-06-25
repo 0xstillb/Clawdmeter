@@ -19,6 +19,8 @@ preference.
 | `claude` | Anthropic Claude | Python | httpx |
 | `codex` | OpenAI Codex | Python | httpx |
 | `go` | OpenCode Go | Python | httpx |
+| `deepseek` | DeepSeek | Python | httpx |
+| `minimax` | MiniMax | Python | httpx |
 
 ## Protocol overview
 
