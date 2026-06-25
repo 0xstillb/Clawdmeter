@@ -32,11 +32,16 @@ from bleak.exc import BleakError
 from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
 from daemon.payloads import build_claude_usage_payload, build_codex_usage_payload, build_opencode_go_payload
 from daemon.plugin_runner import PluginRunner, PluginNotFoundError, PluginCrashedError
+from daemon.petdex.constants import PET_ANIM_CHAR_UUID
+from daemon.petdex.petdex_engine import PetdexEngine
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+
+# Shared petdex engine for this process
+_pet_engine = PetdexEngine()
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -621,6 +626,23 @@ class Session:
             log(f"Write failed: {e}")
             return False
 
+    async def send_pet_animation(self, slug: str, state: str = "idle",
+                                  hold_ms: int = 200) -> bool:
+        payload = _pet_engine.get_payload(slug, state, hold_ms)
+        if not payload:
+            log(f"Petdex: no data for '{slug}/{state}'")
+            return False
+        try:
+            await self.client.write_gatt_char(
+                PET_ANIM_CHAR_UUID, payload, response=True   # MUST use response=True for write-long
+            )
+            log(f"Petdex: sent '{slug}/{state}' ({len(payload)} bytes / "
+                f"{payload[2] | (payload[3] << 8)} frames)")
+            return True
+        except Exception as e:
+            log(f"Petdex: write failed: {e}")
+            return False
+
 
 def _extract_access_token(blob: str) -> str | None:
     """Pull the accessToken out of a credentials blob.
@@ -792,6 +814,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     refresh_callback = session.refresh_requested.set
     if tray_state is not None:
         tray_state.refresh_callback = refresh_callback
+        tray_state.daemon_send_pet = session.send_pet_animation
 
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
@@ -865,6 +888,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     finally:
         if tray_state is not None and tray_state.refresh_callback is refresh_callback:
             tray_state.refresh_callback = None
+            tray_state.daemon_send_pet = None
         # Clean GATT disconnect on the way out — this is what tells the peripheral
         # the link is gone. WinRT can surface a raw OSError (not BleakError) here,
         # so swallow both; the link tears down regardless once we exit.

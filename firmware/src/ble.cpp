@@ -1,4 +1,5 @@
 #include "ble.h"
+#include "pet_buffer.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
@@ -60,6 +61,7 @@ static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* pet_anim_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -134,6 +136,14 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+class PetAnimCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string val = chr->getValue();
+        pet_buffer_load((const uint8_t*)val.data(), val.length());
+        ui_notify_pet_changed();  // declared in ui.h
+    }
+};
+
 // When the daemon enables notifications on the refresh char, ask for data
 // if we have none yet. Firing on subscribe (not on connect) ensures the
 // notification isn't dropped before the daemon's CCCD write completes.
@@ -200,6 +210,14 @@ void ble_init(void) {
     );
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
+
+    // ── Pet animation ──
+    pet_anim_char = svc->createCharacteristic(
+        PET_ANIM_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE     // WRITE (with response) supports fragmented long writes
+    );                              // Do NOT add WRITE_NR — long writes exceed MTU
+    static PetAnimCallbacks petAnimCb;
+    pet_anim_char->setCallbacks(&petAnimCb);
 
     svc->start();
     server->start();

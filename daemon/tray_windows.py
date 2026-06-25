@@ -69,6 +69,7 @@ class TrayState:
         self.loop = None        # asyncio running loop (for call_soon_threadsafe)
         self.stop_event = None  # asyncio.Event (the existing clean-shutdown hook)
         self.refresh_callback = None  # callable that pokes the active session poll loop
+        self.daemon_send_pet = None   # async callable (slug, state, hold_ms) -> bool
 
     def set_connected(self, ts: float) -> None:
         """Called after write_payload returns True.  ts = time.time()."""
@@ -659,6 +660,7 @@ def main() -> None:
     import daemon.autostart_windows as autostart
     from daemon.config import discover_providers, provider_preference, set_provider
     from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
+    from daemon.petdex.petdex_engine import PetdexEngine, POOL_DIR
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
     # Build per-state icons once at startup; swap icon.icon per tick (never recomposite).
@@ -667,6 +669,94 @@ def main() -> None:
 
     ts = TrayState()
     icon = pystray.Icon("Clawdmeter", images["scanning"], "Clawdmeter")
+    _pet_engine = PetdexEngine()
+    _pet_engine.discover()
+
+    # --- Petdex helpers ---
+    def _on_pet_select(slug: str, state_and_hold: tuple[str, int]) -> None:
+        if ts.loop is None or ts.daemon_send_pet is None:
+            return
+        state, hold_ms = state_and_hold
+
+        async def _send() -> None:
+            await ts.daemon_send_pet(slug, state, hold_ms)
+            _pet_engine.active_slug = slug
+
+        _asyncio.run_coroutine_threadsafe(_send(), ts.loop)
+
+    def _preview_pet_popup(slug: str) -> None:
+        """Show a 200x200 preview of the pet's first idle frame."""
+        import tkinter as tk
+        from PIL import Image, ImageTk
+
+        state_dir = POOL_DIR / slug / "idle"
+        pngs = sorted(state_dir.glob("*.png"))
+        if not pngs:
+            return
+
+        img = Image.open(pngs[0]).convert("RGB").resize((200, 200), Image.Resampling.NEAREST)
+
+        def _show() -> None:
+            root = tk.Tk()
+            root.title(f"Petdex: {slug.capitalize()}")
+            root.configure(bg="#050608")
+            root.resizable(False, False)
+
+            tk_img = ImageTk.PhotoImage(img)
+            lbl = tk.Label(root, image=tk_img, bg="#050608")
+            lbl.image = tk_img  # CRITICAL: prevent GC
+            lbl.pack(padx=16, pady=(16, 8))
+
+            btn_frame = tk.Frame(root, bg="#050608")
+            btn_frame.pack(pady=(4, 12))
+
+            tk.Button(btn_frame, text="Select", width=10,
+                      command=lambda: (_on_pet_select(slug, ("idle", 200)), root.destroy())
+                      ).pack(side=tk.LEFT, padx=4)
+            tk.Button(btn_frame, text="Close", width=10,
+                      command=root.destroy).pack(side=tk.LEFT, padx=4)
+
+            # Center on screen
+            root.update_idletasks()
+            x = (root.winfo_screenwidth() - root.winfo_width()) // 2
+            y = (root.winfo_screenheight() - root.winfo_height()) // 2
+            root.geometry(f"+{x}+{y}")
+
+            root.mainloop()
+
+        threading.Thread(target=_show, daemon=True).start()
+
+    def _on_seed_from_hermes(_icon_ref=None, _item=None) -> None:
+        """Discover installed pets in ~/.hermes/pets and copy them into pool."""
+        hermes_pets = Path.home() / ".hermes" / "pets"
+        if not hermes_pets.exists():
+            daemon_log("Petdex: no ~/.hermes/pets directory found")
+            return
+        for pet_dir in sorted(hermes_pets.iterdir()):
+            if not pet_dir.is_dir() or pet_dir.name.startswith("."):
+                continue
+            if _pet_engine.seed_from_hermes(pet_dir.name):
+                daemon_log(f"Petdex: seeded {pet_dir.name}")
+        _pet_engine.discover()
+        icon.update_menu()
+
+    def _build_petdex_menu() -> Menu:
+        _pet_engine.discover()
+        items = []
+        for slug, states in sorted(_pet_engine.pets.items()):
+            checked = (slug == _pet_engine.active_slug)
+            marker = "✓ " if checked else "  "
+            items.append(MenuItem(
+                f"{marker}{slug.capitalize()} ▶",
+                Menu(
+                    MenuItem("Select", lambda s=slug: _on_pet_select(s, ("idle", 200))),
+                    MenuItem("Preview...", lambda s=slug: _preview_pet_popup(s)),
+                )
+            ))
+        if not items:
+            items.append(MenuItem("(no pets installed)", None, enabled=False))
+        items.append(MenuItem("Seed from Hermes...", _on_seed_from_hermes))
+        return Menu(*items)
 
     # --- background thread: asyncio loop ---
     def _run_daemon() -> None:
@@ -739,6 +829,7 @@ def main() -> None:
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
         MenuItem("Provider", Menu(*(_provider_item(provider) for provider in discover_providers()))),
+        MenuItem("Petdex Mascot", _build_petdex_menu()),
         Menu.SEPARATOR,
         MenuItem("Credentials",
             Menu(

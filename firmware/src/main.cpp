@@ -12,6 +12,7 @@
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
+#include "pet_buffer.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -257,6 +258,9 @@ void setup() {
     input_hal_init();
 
     ui_init();
+    if (!pet_buffer_alloc()) {
+        Serial.println("pet_buffer: alloc failed — pets disabled");
+    }
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
     ui_show_screen(SCREEN_SPLASH);

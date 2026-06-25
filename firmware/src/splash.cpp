@@ -1,4 +1,5 @@
 #include "splash.h"
+#include "pet_buffer.h"
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
@@ -27,6 +28,10 @@ static uint32_t frame_started_ms = 0;
 static uint32_t last_pick_ms = 0;
 static bool active = false;
 static uint8_t splash_phase = 0;
+
+// Splash pet frame state (reset when pet changes)
+static uint32_t s_splash_pet_timer = 0;
+static int      s_splash_pet_frame = 0;
 
 // Prepaid balance override (-1 = use rate-based picking)
 static int g_prepaid_balance = -1;
@@ -99,14 +104,35 @@ static void render_hermes_splash(void) {
     const int art_w = 20 * px;
     const int ox = (canvas_w - art_w) / 2;
     const int oy = (canvas_h - art_w) / 2 + ((splash_phase % 24) < 12 ? 0 : 1);
-    for (int y = 0; y < 20; ++y) {
-        for (int x = 0; x < 20; ++x) {
-            char code = HERMES_SPLASH_FRAME[y * 20 + x];
-            if (code == '0') continue;
-            put_square(ox + x * px, oy + y * px, px, code == '2' ? shade : body);
+
+    if (pet_buffer_ready()) {
+        // ══ Pet (frame 0, static) ══
+        // Splash shows one still frame. Different moods come from daemon
+        // sending different state data (idle/run/error).
+        const uint8_t* frame = pet_buffer_frame(0);
+        if (frame) {
+            for (int y = 0; y < 20; ++y) {
+                for (int x = 0; x < 20; ++x) {
+                    uint8_t idx = frame[y * 20 + x];
+                    // All indices are opaque
+                    put_square(ox + x * px, oy + y * px, px,
+                        pet_buffer_palette()[idx]);
+                }
+            }
+        }
+    } else {
+        // ══ Fallback: Hermes face (existing code) ══
+        for (int y = 0; y < 20; ++y) {
+            for (int x = 0; x < 20; ++x) {
+                char code = HERMES_SPLASH_FRAME[y * 20 + x];
+                if (code == '0') continue;
+                put_square(ox + x * px, oy + y * px, px,
+                    code == '2' ? shade : body);
+            }
         }
     }
 
+    // ── Particles (unchanged) ──
     if ((cur_anim & 1) == 0) {
         const int t = splash_phase % 48;
         for (int i = 0; i < 4; ++i) {
@@ -304,6 +330,11 @@ lv_obj_t* splash_get_root(void) {
 }
 void splash_set_hint(const char* text) {
     (void)text;
+}
+
+void splash_notify_pet_changed(void) {
+    s_splash_pet_timer = millis();
+    s_splash_pet_frame = 0;
 }
 
 void splash_show_hint(bool show) {

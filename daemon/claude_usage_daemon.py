@@ -24,11 +24,16 @@ from bleak.exc import BleakError
 from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
 from daemon.payloads import build_claude_usage_payload
 from daemon.plugin_runner import PluginRunner, PluginNotFoundError, PluginCrashedError
+from daemon.petdex.constants import PET_ANIM_CHAR_UUID
+from daemon.petdex.petdex_engine import PetdexEngine
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+
+# Shared petdex engine for this process
+_pet_engine = PetdexEngine()
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -334,6 +339,23 @@ class Session:
             return True
         except BleakError as e:
             log(f"Write failed: {e}")
+            return False
+
+    async def send_pet_animation(self, slug: str, state: str = "idle",
+                                  hold_ms: int = 200) -> bool:
+        payload = _pet_engine.get_payload(slug, state, hold_ms)
+        if not payload:
+            log(f"Petdex: no data for '{slug}/{state}'")
+            return False
+        try:
+            await self.client.write_gatt_char(
+                PET_ANIM_CHAR_UUID, payload, response=True   # MUST use response=True for write-long
+            )
+            log(f"Petdex: sent '{slug}/{state}' ({len(payload)} bytes / "
+                f"{payload[2] | (payload[3] << 8)} frames)")
+            return True
+        except Exception as e:
+            log(f"Petdex: write failed: {e}")
             return False
 
 

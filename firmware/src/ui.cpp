@@ -3,6 +3,7 @@
 #include "splash.h"
 #include "icons.h"
 #include "theme.h"
+#include "pet_buffer.h"
 #include "hal/board_caps.h"
 #include <cstdio>
 #include <cstdlib>
@@ -225,6 +226,10 @@ static uint8_t card_glow_phase = 0;
 static int16_t idle_glow_w = 0;
 static int16_t idle_glow_h = 0;
 static int16_t pair_scan_base = 0;
+
+// Pet animation state (file-scope so ui_notify_pet_changed() can reset)
+static uint32_t s_pet_last_frame_ms = 0;
+static int      s_pet_frame = 0;
 
 static void compute_layout(const BoardCaps& c) {
     memset(&L, 0, sizeof(L));
@@ -555,6 +560,32 @@ static void draw_rect_565(uint16_t* buf, int w, int h, int x0, int y0, int rw, i
 }
 
 static void render_hermes_header_icon(int mode, uint8_t phase) {
+    if (pet_buffer_ready()) {
+        // ══ Pet face (still, first frame) ══
+        const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
+        for (int i = 0; i < 54 * 54; ++i) brand_canvas_buf[i] = bg;
+
+        const uint8_t* frame = pet_buffer_frame(0);
+        if (frame) {
+            for (int sy = 0; sy < 20; ++sy) {
+                for (int sx = 0; sx < 20; ++sx) {
+                    uint8_t idx = frame[sy * 20 + sx];
+                    // All indices are opaque. Scale 20→54 with exact ranges (no gaps)
+                    int x0 = (sx * 54) / 20;
+                    int x1 = ((sx + 1) * 54) / 20;
+                    int y0 = (sy * 54) / 20;
+                    int y1 = ((sy + 1) * 54) / 20;
+                    draw_rect_565(brand_canvas_buf, 54, 54,
+                        x0, y0, x1 - x0, y1 - y0,
+                        pet_buffer_palette()[idx]);
+                }
+            }
+        }
+        if (brand_canvas) lv_obj_invalidate(brand_canvas);
+        return;
+    }
+
+    // ══ Fallback: Hermes logo (existing code below) ══
     const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
     const uint16_t blue = make_rgb565(0x5a, 0x7a, 0xff);
     const uint16_t yellow = make_rgb565(0xff, 0xd5, 0x3d);
@@ -594,23 +625,38 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
 }
 
 static void render_hermes_idle_icon(uint8_t phase) {
-    const uint8_t dim = 190 + (phase < 24 ? phase : 48 - phase);
-    const uint16_t body = make_rgb565((0xec * dim) / 214, (0xe6 * dim) / 214, (0xdb * dim) / 214);
-    const uint16_t shade = make_rgb565((0xde * dim) / 214, (0xda * dim) / 214, (0xd0 * dim) / 214);
-
     uint16_t* rgb = reinterpret_cast<uint16_t*>(idle_canvas_buf);
     uint8_t* alpha = idle_canvas_buf + 20 * 20 * 2;
-    for (int i = 0; i < 20 * 20; ++i) {
-        const char code = HERMES_HEADER_FRAME[i];
-        if (code == '0') {
-            rgb[i] = 0;          // RGB value doesn't matter when alpha=0
-            alpha[i] = 0;        // fully transparent
-        } else {
-            rgb[i] = (code == '2') ? shade : body;
-            alpha[i] = 255;      // fully opaque
+
+    if (pet_buffer_ready()) {
+        // ── Pet animation loop ──
+        uint32_t now = millis();
+        if (now - s_pet_last_frame_ms >= pet_buffer_hold_ms()) {
+            s_pet_last_frame_ms = now;
+            s_pet_frame = (s_pet_frame + 1) % pet_buffer_frame_count();
+        }
+        const uint8_t* frame = pet_buffer_frame(s_pet_frame);
+        if (frame) {
+            for (int i = 0; i < 400; i++) {
+                uint8_t idx = frame[i];
+                // ALL palette indices are opaque — pet sprite fills 20×20
+                rgb[i] = pet_buffer_palette()[idx];
+                alpha[i] = 255;
+            }
+            if (idle_canvas) lv_obj_invalidate(idle_canvas);
+            return;
         }
     }
 
+    // ── Fallback: Hermes head (existing code, unchanged) ──
+    const uint8_t dim = 190 + (phase < 24 ? phase : 48 - phase);
+    const uint16_t body = make_rgb565((0xec * dim) / 214, (0xe6 * dim) / 214, (0xdb * dim) / 214);
+    const uint16_t shade = make_rgb565((0xde * dim) / 214, (0xda * dim) / 214, (0xd0 * dim) / 214);
+    for (int i = 0; i < 400; i++) {
+        char code = HERMES_HEADER_FRAME[i];
+        if (code == '0') { rgb[i] = 0; alpha[i] = 0; }
+        else { rgb[i] = (code == '2') ? shade : body; alpha[i] = 255; }
+    }
     if (idle_canvas) lv_obj_invalidate(idle_canvas);
 }
 
@@ -1676,4 +1722,13 @@ void ui_update_battery(int percent, bool charging) {
 
     lv_image_set_src(battery_img, &battery_dscs[idx]);
     apply_battery_visibility();
+}
+
+void ui_notify_pet_changed(void) {
+    s_pet_last_frame_ms = millis();  // NOT 0 — avoids skipping frame 0
+    s_pet_frame = 0;
+    splash_notify_pet_changed();
+    // Force re-render of current icons
+    render_hermes_idle_icon(idle_anim_phase);
+    render_hermes_header_icon(view_state, header_anim_phase);
 }
