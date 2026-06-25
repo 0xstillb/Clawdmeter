@@ -200,6 +200,7 @@ static int view_state = -1;  // 0 pair, 1 idle, 2 usage
 static int forced_view_override = -1;
 static uint32_t last_data_ms = 0;
 static const uint32_t DATA_FRESH_MS = 120000;
+static const uint32_t IDLE_TO_SPLASH_MS = 300000;  // 5 min idle → auto splash
 static UsageData current_usage = {};
 static uint8_t flow_anim_phase = 0;
 static uint32_t flow_anim_ms = 0;
@@ -1467,6 +1468,13 @@ void ui_update(const UsageData* data) {
     update_header_provider();
     set_usage_panel(&panel_top, &data->top, true);
     set_usage_panel(&panel_bottom, &data->bottom, false);
+
+    // Auto-return from splash when BLE data comes back
+    if (current_screen == SCREEN_SPLASH && data->valid) {
+        ui_show_screen(SCREEN_USAGE);
+        return;
+    }
+
     update_view_state();
 }
 
@@ -1475,6 +1483,20 @@ void ui_tick_anim(void) {
     update_view_state();
 
     const uint32_t now = lv_tick_get();
+
+    // ── idle for IDLE_TO_SPLASH_MS → auto splash ─────────────────
+    static uint32_t idle_since_ms = 0;
+    if (view_state == 1) {  // idle (no data)
+        if (idle_since_ms == 0) idle_since_ms = now;
+        else if (now - idle_since_ms >= IDLE_TO_SPLASH_MS) {
+            idle_since_ms = 0;
+            ui_show_screen(SCREEN_SPLASH);
+            return;  // splash handles its own animation ticks
+        }
+    } else {
+        idle_since_ms = 0;  // pair or usage → reset
+    }
+
     if ((view_state == 2 || view_state == 0) && now - flow_anim_ms >= 35) {
         flow_anim_ms = now;
         flow_anim_phase = (uint8_t)((flow_anim_phase + 1) % 48);
