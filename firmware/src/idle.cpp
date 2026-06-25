@@ -3,6 +3,7 @@
 #include "idle_cfg.h"
 #include "hal/display_hal.h"
 #include "hal/power_hal.h"
+#include "hal/board_caps.h"
 
 enum IdleState {
     STATE_AWAKE,
@@ -77,6 +78,9 @@ bool idle_is_asleep(void) {
 
 void idle_tick(void) {
     uint32_t now = millis();
+
+    // ── always_on boards never sleep (no battery, USB always powered) ─
+    if (board_caps().always_on) return;
 
     // While on USB power (if configured), don't sleep — and wake from sleep
     // when power comes back. Treats USB-in as continuous activity.

@@ -47,4 +47,5 @@
 #define BOARD_HAS_ROTATION         0   // TODO: IMU-driven CPU rotation in display.cpp
 #define BOARD_HAS_IMU              0   // TODO
 #define BOARD_HAS_BATTERY          0   // TODO
+#define BOARD_HAS_ALWAYS_ON        0   // no battery, never sleep
 #define BOARD_HAS_IO_EXPANDER      0   // TODO

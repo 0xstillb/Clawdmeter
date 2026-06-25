@@ -10,7 +10,8 @@ static const BoardCaps caps = {
     .button_count = (uint8_t)(1 + BOARD_HAS_SECONDARY_BUTTON),
     .has_rotation = (bool)BOARD_HAS_ROTATION,
     .has_battery = (bool)BOARD_HAS_BATTERY,
-    .has_imu = (bool)BOARD_HAS_IMU,
+    .has_imu      = (bool)BOARD_HAS_IMU,
+    .always_on    = (bool)BOARD_HAS_ALWAYS_ON,
 };
 
 const BoardCaps& board_caps(void) { return caps; }

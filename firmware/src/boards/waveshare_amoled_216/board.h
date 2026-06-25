@@ -42,4 +42,5 @@
 #define BOARD_HAS_ROTATION         1
 #define BOARD_HAS_IMU              1
 #define BOARD_HAS_BATTERY          1
+#define BOARD_HAS_ALWAYS_ON        0   // no battery, never sleep
 #define BOARD_HAS_IO_EXPANDER      0

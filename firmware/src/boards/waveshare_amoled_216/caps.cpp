@@ -8,7 +8,8 @@ static const BoardCaps caps = {
     .button_count = 2,
     .has_rotation = true,
     .has_battery = true,
-    .has_imu = true,
+    .has_imu      = (bool)BOARD_HAS_IMU,
+    .always_on    = (bool)BOARD_HAS_ALWAYS_ON,
 };
 
 const BoardCaps& board_caps(void) { return caps; }
