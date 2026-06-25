@@ -45,6 +45,7 @@ static void init_usage(UsageData* out) {
     if (!out) return;
     out->provider = USAGE_PROVIDER_UNKNOWN;
     out->mode[0] = '\0';
+    copy_text(out->plan_type, sizeof(out->plan_type), "subscription");
     init_panel(&out->top);
     init_panel(&out->bottom);
     copy_text(out->status, sizeof(out->status), "unknown");
@@ -262,6 +263,7 @@ static bool parse_provider_payload(const char* json, UsageData* out) {
     char provider_text[20] = {0};
     parse_string_field(json, end, "p", provider_text, sizeof(provider_text));
     out->provider = provider_from_text(provider_text);
+    parse_string_field(json, end, "plan_type", out->plan_type, sizeof(out->plan_type));
     parse_string_field(json, end, "mode", out->mode, sizeof(out->mode));
     parse_string_field(json, end, "st", out->status, sizeof(out->status));
     parse_bool_field(json, end, "ok", &out->ok);

@@ -26,6 +26,7 @@ struct UsagePanelData {
 
 struct UsageData {
     UsageProvider provider;
+    char plan_type[16];
     char mode[20];
     UsagePanelData top;
     UsagePanelData bottom;

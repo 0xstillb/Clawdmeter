@@ -205,63 +205,118 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     )
 
 
-def build_deepseek_usage_payload(headers: Mapping[str, str], *, now: float) -> dict:
-    """Build a BLE payload from DeepSeek API rate-limit headers.
+def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None, total_top_up: float = 0) -> dict:
+    """Build a BLE payload from DeepSeek balance API data (prepaid model).
 
-    DeepSeek returns per-minute rate-limit headers on every API response:
-      - X-RateLimit-Limit-Requests  (max requests per minute)
-      - X-RateLimit-Remaining-Requests  (remaining in this minute window)
-      - X-RateLimit-Reset-Requests  (seconds until reset)
+    DeepSeek is a prepaid (เติมเงิน) provider — usage is based on
+    remaining balance vs total amount topped up.
 
-    Also uses X-RateLimit-Limit-Tokens / X-RateLimit-Remaining-Tokens when
-    available for a token-based view.  Falls back to requests-based when
-    token headers are absent.
+    ``balance_data`` shape from ``GET /user/balance``::
 
-    Mapping: top card = requests/utilization (short window, per-minute),
-             bottom card = token utilization (longer view).
+        {
+            "is_available": true,
+            "balance_infos": [{
+                "currency": "CNY",
+                "total_balance": "110.00",
+                "granted_balance": "10.00",
+                "topped_up_balance": "100.00"
+            }]
+        }
+
+    ``total_top_up`` is the user's configured total top-up amount (optional).
+    If provided, ``used_pct = (total_top_up - current_topped_up) / total_top_up * 100``.
+    If omitted, the plugin reports remaining balance as a flat 0% usage with
+    the balance amount in subtext.
+
+    Mapping:
+      - Top card (``wallet_depletion``) → remaining balance %
+      - Bottom card (``budget_daily``) → consumed %
     """
-    current_time = time.time() if now is None else now
+    infos = balance_data.get("balance_infos", [])
+    if not isinstance(infos, list) or not infos:
+        return _build_deepseek_fallback_payload(now)
 
-    def hdr(name: str, default: str = "0") -> str:
-        return headers.get(name, default)
+    info = infos[0] if isinstance(infos[0], dict) else {}
+    is_available = bool(balance_data.get("is_available", True))
+    currency = info.get("currency", "CNY")
+    total_balance = float(info.get("total_balance", 0) or 0)
+    topped_up_balance = float(info.get("topped_up_balance", 0) or 0)
+    granted_balance = float(info.get("granted_balance", 0) or 0)
 
-    # ── request-based (short window) ─────────────────────────────────
-    req_limit = _int_pct(hdr("x-ratelimit-limit-requests", "60"))
-    req_remaining = _int_pct(hdr("x-ratelimit-remaining-requests", "0"))
-    req_reset_sec = _int_pct(hdr("x-ratelimit-reset-requests", "60"))
-    req_pct = 100 - int(round(req_remaining / max(req_limit, 1) * 100)) if req_limit > 0 else 0
-    req_reset_mins = int(round(req_reset_sec / 60)) if req_reset_sec > 0 else 0
+    # ── Compute usage percentage ────────────────────────────────────
+    used_pct = 0
+    remaining_pct = 100
 
-    # ── token-based (long window) ───────────────────────────────────
-    tok_limit = _int_pct(hdr("x-ratelimit-limit-tokens", "0"))
-    tok_remaining = _int_pct(hdr("x-ratelimit-remaining-tokens", "0"))
-    tok_reset_sec = _int_pct(hdr("x-ratelimit-reset-tokens", "0"))
-    has_token_headers = tok_limit > 0
+    if total_top_up > 0 and topped_up_balance > 0:
+        consumed = max(0, total_top_up - topped_up_balance)
+        used_pct = max(0, min(100, int(round(consumed / total_top_up * 100))))
+        remaining_pct = 100 - used_pct
+    elif total_balance > 0:
+        # Without total_top_up, just show total_balance as "health"
+        # where higher balance = more remaining
+        remaining_pct = min(100, int(total_balance))  # rough: treat balance as %
+        used_pct = 100 - remaining_pct
 
-    if has_token_headers:
-        tok_pct = 100 - int(round(tok_remaining / max(tok_limit, 1) * 100)) if tok_limit > 0 else 0
-        tok_reset_mins = int(round(tok_reset_sec / 60)) if tok_reset_sec > 0 else 0
-    else:
-        tok_pct = req_pct
-        tok_reset_mins = req_reset_mins
-
-    status = "allowed"
-    if tok_pct >= 90 or req_pct >= 90:
+    status = "allowed" if is_available else "limited"
+    if remaining_pct <= 10:
         status = "limited"
-    elif tok_pct >= 75 or req_pct >= 75:
+    elif remaining_pct <= 25:
         status = "warning"
 
-    return build_windowed_payload(
+    return build_provider_payload(
         provider="deepseek",
-        top_pct=req_pct,
-        top_reset_mins=req_reset_mins,
-        bottom_pct=tok_pct,
-        bottom_reset_mins=tok_reset_mins,
+        mode="prepaid",
+        top={
+            "label": "Balance",
+            "kind": "wallet_depletion",
+            "pct": remaining_pct,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": f"{total_balance:.2f} {currency}",
+        },
+        bottom={
+            "label": "Used",
+            "kind": "budget_daily",
+            "pct": used_pct,
+            "reset_mins": 1440,
+            "has_reset": True,
+            "subtext": f"{used_pct}% consumed" if used_pct > 0 else "topped up",
+        },
         status=status,
-        top_has_reset=req_reset_mins > 0,
-        bottom_has_reset=tok_reset_mins > 0,
-        top_subtext="requests/min" if req_reset_mins <= 0 else None,
-        bottom_subtext="tokens/min" if not has_token_headers else None,
+        ok=is_available,
+        legacy_aliases={
+            "s": remaining_pct,
+            "sr": 0,
+            "w": used_pct,
+            "wr": 1440,
+        },
+    )
+
+
+def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
+    """Return a minimal payload when balance API response is unexpected."""
+    return build_provider_payload(
+        provider="deepseek",
+        mode="prepaid",
+        top={
+            "label": "Balance",
+            "kind": "wallet_depletion",
+            "pct": 0,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": "unavailable",
+        },
+        bottom={
+            "label": "Used",
+            "kind": "budget_daily",
+            "pct": 0,
+            "reset_mins": 1440,
+            "has_reset": True,
+            "subtext": "unknown",
+        },
+        status="unknown",
+        ok=False,
+        legacy_aliases={"s": 0, "sr": 0, "w": 0, "wr": 1440},
     )
 
 

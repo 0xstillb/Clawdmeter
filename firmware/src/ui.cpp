@@ -765,7 +765,7 @@ static void format_panel_heading(const UsagePanelData* panel, bool top, char* bu
     } else if (strcmp(panel->kind, "budget_daily") == 0) {
         snprintf(buf, buf_size, "Daily budget");
     } else if (strcmp(panel->kind, "wallet_depletion") == 0) {
-        snprintf(buf, buf_size, "Wallet balance");
+        snprintf(buf, buf_size, "Balance remaining");
     } else if (panel->label[0]) {
         snprintf(buf, buf_size, "%s", panel->label);
     } else {
@@ -790,7 +790,8 @@ static void format_panel_meta_left(const UsagePanelData* panel, bool top, char* 
     } else if (strcmp(panel->kind, "budget_daily") == 0) {
         snprintf(buf, buf_size, "day left");
     } else if (strcmp(panel->kind, "wallet_depletion") == 0) {
-        snprintf(buf, buf_size, "wallet left");
+        const bool is_prepaid = (strcmp(current_usage.plan_type, "prepaid") == 0);
+        snprintf(buf, buf_size, is_prepaid ? "balance left" : "wallet left");
     } else if (panel->kind[0]) {
         snake_to_words(panel->kind, buf, buf_size);
     } else if (panel->label[0]) {
@@ -1007,6 +1008,8 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     char heading[40];
     char meta_left[40];
     char meta_right[48];
+    const bool is_prepaid = (strcmp(current_usage.plan_type, "prepaid") == 0);
+
     format_panel_heading(panel, top, heading, sizeof(heading));
     format_panel_meta_left(panel, top, meta_left, sizeof(meta_left));
 
@@ -1021,15 +1024,22 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
         return;
     }
 
-    const int pct = static_cast<int>(panel->pct + 0.5f);
+    int pct = static_cast<int>(panel->pct + 0.5f);
     lv_label_set_text_fmt(widgets->pct, "%d%%", pct);
     lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
+
+    // ── prepaid: bar shows remaining balance (high = good) ──────────
+    int bar_pct = pct;
+    if (is_prepaid && top && strcmp(panel->kind, "wallet_depletion") == 0) {
+        bar_pct = pct;  // remaining %, bar fill = remaining balance
+    }
+
     if (widgets->bar_fill) {
         const int track_w = L.card_w - L.card_pad_l - L.card_pad_r;
         const int inner_w = track_w > 2 ? track_w - 2 : track_w;
         const int inner_h = L.bar_h > 2 ? L.bar_h - 2 : L.bar_h;
-        int fill_w = (inner_w * pct) / 100;
-        if (pct > 0 && fill_w < inner_h) fill_w = inner_h;
+        int fill_w = (inner_w * bar_pct) / 100;
+        if (bar_pct > 0 && fill_w < inner_h) fill_w = inner_h;
         if (fill_w > inner_w) fill_w = inner_w;
         lv_obj_set_size(widgets->bar_fill, fill_w, inner_h);
     }

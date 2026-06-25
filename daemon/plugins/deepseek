@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """DeepSeek provider plugin for Clawdmeter.
 
-Polls the DeepSeek API rate-limit headers and returns a BLE payload.
+DeepSeek is a **prepaid** (เติมเงิน) provider — usage is tracked via
+remaining balance, not rate-limit headers.
+
+Fetches ``GET /user/balance`` and returns a payload with ``plan_type: prepaid``
+so the ESP32 firmware renders balance info instead of usage windows.
 
 Credentials (checked in order):
   1. DEEPSEEK_API_KEY env var
-  2. ~/.config/clawdmeter/deepseek-credentials.json (key: api_key)
+  2. ~/.config/clawdmeter/deepseek-credentials.json (keys: api_key, total_top_up)
+
+``total_top_up`` is optional. If set, the plugin computes
+``used_pct = (total_top_up - current_topped_up) / total_top_up * 100``.
+Without it, the plugin just reports the raw balance.
 
 Dependencies: httpx
 Protocol: DAEMON_PLUGIN_PROTOCOL.md
@@ -32,14 +40,9 @@ from daemon.payloads import build_deepseek_usage_payload
 
 # ── constants ───────────────────────────────────────────────────────────────
 
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
-_API_BODY = {
-    "model": "deepseek-chat",
-    "max_tokens": 1,
-    "messages": [{"role": "user", "content": "hi"}],
-}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -51,12 +54,23 @@ def _debug(*args: object) -> None:
         print("[deepseek]", *args, file=sys.stderr)
 
 
-def _read_api_key() -> str | None:
-    """Return DeepSeek API key from env or config file."""
-    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if key:
-        _debug("using env DEEPSEEK_API_KEY")
-        return key
+def _read_credentials() -> dict | None:
+    """Return {api_key, total_top_up} from env or config file.
+
+    ``total_top_up`` is optional — can be 0 or None.
+    """
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    total_top_up_str = os.environ.get("DEEPSEEK_TOTAL_TOP_UP", "").strip()
+
+    if api_key:
+        total_top_up = 0.0
+        if total_top_up_str:
+            try:
+                total_top_up = float(total_top_up_str)
+            except ValueError:
+                pass
+        _debug("using env credentials")
+        return {"api_key": api_key, "total_top_up": total_top_up}
 
     config_paths = [
         Path.home() / ".config" / "clawdmeter" / "deepseek-credentials.json",
@@ -66,10 +80,18 @@ def _read_api_key() -> str | None:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        key = data.get("api_key", "").strip()
-        if key:
-            _debug(f"using credentials from {path}")
-            return key
+        api_key = data.get("api_key", "").strip()
+        if not api_key:
+            continue
+        total_top_up = 0.0
+        raw = data.get("total_top_up")
+        if raw:
+            try:
+                total_top_up = float(raw)
+            except (TypeError, ValueError):
+                pass
+        _debug(f"using credentials from {path}")
+        return {"api_key": api_key, "total_top_up": total_top_up}
     return None
 
 
@@ -85,17 +107,24 @@ def _is_auth_failure(msg: str | None) -> bool:
 
 
 async def poll() -> PluginResponse:
-    """Read PluginRequest, check usage via DeepSeek API, return PluginResponse."""
+    """Read PluginRequest, fetch DeepSeek balance, return PluginResponse."""
     req = PluginRequest.from_stdin()
     _debug(f"request: action={req.action}, last_error={req.last_error!r}")
 
     # ── credentials ────────────────────────────────────────────────────
-    api_key = _read_api_key()
-    if api_key is None:
+    creds = _read_credentials()
+    if creds is None:
         return PluginResponse.failure(
             "DeepSeek: API key not configured — set DEEPSEEK_API_KEY env var "
             "or create ~/.config/clawdmeter/deepseek-credentials.json",
             retry=False,
+        )
+
+    api_key = creds.get("api_key", "")
+    total_top_up = creds.get("total_top_up", 0.0)
+    if not api_key:
+        return PluginResponse.failure(
+            "DeepSeek: API key is empty", retry=False
         )
 
     # ── repeated auth failure → stop retrying ─────────────────────────
@@ -106,16 +135,16 @@ async def poll() -> PluginResponse:
             retry=False,
         )
 
-    # ── minimal API call to get rate-limit headers ─────────────────────
+    # ── fetch balance ──────────────────────────────────────────────────
     headers = {
+        "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
         "User-Agent": _USER_AGENT,
     }
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
-            resp = await http.post(DEEPSEEK_API_URL, headers=headers, json=_API_BODY)
+            resp = await http.get(DEEPSEEK_BALANCE_URL, headers=headers)
     except httpx.HTTPError as e:
         _debug(f"HTTP request failed: {e}")
         return PluginResponse.failure(f"DeepSeek: Network error: {e}", retry=True)
@@ -128,30 +157,28 @@ async def poll() -> PluginResponse:
             retry=False,
         )
 
-    if resp.status_code == 429:
-        _debug("rate limited (HTTP 429)")
-        # When rate-limited, we know usage is at 100%
-        import time as _time
-        now = _time.time()
-        payload = build_deepseek_usage_payload(
-            {
-                "x-ratelimit-limit-requests": "60",
-                "x-ratelimit-remaining-requests": "0",
-                "x-ratelimit-reset-requests": "60",
-            },
-            now=now,
-        )
-        return PluginResponse.success(payload)
-
     if resp.status_code >= 400:
         _debug(f"HTTP {resp.status_code}: {resp.text[:200]}")
         return PluginResponse.failure(
             f"DeepSeek: HTTP {resp.status_code}", retry=True
         )
 
+    # ── parse response ─────────────────────────────────────────────────
+    try:
+        body = resp.json()
+    except json.JSONDecodeError:
+        _debug("response was not JSON")
+        return PluginResponse.failure(
+            "DeepSeek: API returned invalid JSON", retry=True
+        )
+
+    if not isinstance(body, dict):
+        return PluginResponse.failure(
+            "DeepSeek: unexpected response format", retry=True
+        )
+
     # ── build and return payload ───────────────────────────────────────
-    now = time.time()
-    payload = build_deepseek_usage_payload(dict(resp.headers), now=now)
+    payload = build_deepseek_usage_payload(body, now=time.time(), total_top_up=total_top_up)
     return PluginResponse.success(payload)
 
 
