@@ -262,7 +262,8 @@ void splash_tick(void) {
     if (!active) return;
 
     // Auto-rotate to the next animation in the current group.
-    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+    // Skip if a user-selected pet is loaded (petdex override).
+    if (!pet_buffer_ready() && millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
         splash_pick_for_current_rate();
     }
 
@@ -313,6 +314,9 @@ bool splash_is_active(void) { return active; }
 void splash_show(void) {
     if (g_prepaid_balance >= 0) {
         splash_pick_for_prepaid(g_prepaid_balance);
+    } else if (pet_buffer_ready()) {
+        // Keep the pet visible — don't select Hermes animation
+        render_hermes_splash();
     } else {
         splash_pick_for_current_rate();
     }

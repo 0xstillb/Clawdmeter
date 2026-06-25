@@ -6,7 +6,7 @@ Converts petdex PNG sprite sequences to the ESP32 binary BLE payload format:
 
   [hold_ms:u16][frame_count:u16][palette:10xuint16][N*400 bytes]
 
-Pool directory structure:
+Clawdmeter-local pool directory structure:
   daemon/petdex/pool/<slug>/<state>/*.png
 """
 
@@ -43,7 +43,7 @@ class PetdexEngine:
                 self.pets[pet_dir.name] = states
         return self.pets
 
-    def convert(self, png_paths: list[str], hold_ms: int = 200) -> bytes | None:
+    def convert(self, png_paths: list[str], hold_ms: int = 200, max_frames: int | None = None) -> bytes | None:
         """
         Convert sorted PNG list to binary BLE payload.
 
@@ -56,10 +56,15 @@ class PetdexEngine:
         if not png_paths:
             return None
 
+        # Limit frames if max_frames specified (avoids BLE long write failures)
+        paths = sorted(png_paths)
+        if max_frames is not None:
+            paths = paths[:max_frames]
+
         frames_bytes = []
         palette_rgb565 = None
 
-        for path in sorted(png_paths):
+        for path in paths:
             img = Image.open(path).convert("RGB").resize((GRID, GRID), Image.Resampling.NEAREST)
             # Quantize to PAL_MAX colors
             img = img.quantize(colors=PAL_MAX)
@@ -97,24 +102,11 @@ class PetdexEngine:
         return bytes(payload)
 
     def get_payload(self, slug: str, state: str = "idle",
-                    hold_ms: int = 200) -> bytes | None:
+                    hold_ms: int = 200, max_frames: int | None = None) -> bytes | None:
         """Get BLE-ready payload for a pet state."""
         if slug not in self.pets:
             return None
         pngs = self.pets[slug].get(state)
         if not pngs:
             return None
-        return self.convert(pngs, hold_ms)
-
-    def seed_from_hermes(self, slug: str) -> bool:
-        """Copy pet from ~/.hermes/pets/<slug>/ if available."""
-        import shutil
-        src = Path.home() / ".hermes" / "pets" / slug
-        if not src.exists():
-            return False
-        dest = POOL_DIR / slug
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(src, dest)
-        self.discover()
-        return True
+        return self.convert(pngs, hold_ms, max_frames=max_frames)

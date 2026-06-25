@@ -34,6 +34,7 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
 # Shared petdex engine for this process
 _pet_engine = PetdexEngine()
+_pet_engine.discover()
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -343,7 +344,7 @@ class Session:
 
     async def send_pet_animation(self, slug: str, state: str = "idle",
                                   hold_ms: int = 200) -> bool:
-        payload = _pet_engine.get_payload(slug, state, hold_ms)
+        payload = _pet_engine.get_payload(slug, state, hold_ms, max_frames=1)
         if not payload:
             log(f"Petdex: no data for '{slug}/{state}'")
             return False

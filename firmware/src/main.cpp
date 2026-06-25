@@ -442,6 +442,8 @@ void loop() {
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
+    pet_buffer_tick();  // apply BLE-staged pet data on main loop context
+    ui_pet_tick();      // handle deferred pet-changed LVGL work on main loop context
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
@@ -538,7 +540,7 @@ void loop() {
                 if (g_after != g_before) {
                     Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
                         g_before, g_after, usage.top.pct);
-                    if (splash_is_active()) splash_pick_for_current_rate();
+                    if (splash_is_active() && !pet_buffer_ready()) splash_pick_for_current_rate();
                 }
             }
             ui_update(&usage);

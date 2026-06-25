@@ -23,3 +23,5 @@ void ui_update_battery(int percent, bool charging);
 
 // Called from BLE callback when new pet animation arrives
 void ui_notify_pet_changed(void);
+// Called from main loop to apply the deferred pet change (LVGL work)
+void ui_pet_tick(void);

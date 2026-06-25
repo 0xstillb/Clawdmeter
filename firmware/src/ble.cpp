@@ -140,8 +140,14 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
 class PetAnimCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
         std::string val = chr->getValue();
-        pet_buffer_load((const uint8_t*)val.data(), val.length());
-        ui_notify_pet_changed();  // declared in ui.h
+        if (val.empty()) {
+            pet_buffer_clear();
+            Serial.println("BLE: pet cleared (empty payload)");
+        } else {
+            pet_buffer_load((const uint8_t*)val.data(), val.length());
+            // Apply immediately via tick so the new frame shows up next render
+        }
+        ui_notify_pet_changed();
     }
 };
 
@@ -172,24 +178,6 @@ void ble_init(void) {
     static ServerCallbacks serverCb;
     server->setCallbacks(&serverCb);
 
-    // --- HID keyboard service ---
-    hid_dev = new NimBLEHIDDevice(server);
-    hid_dev->setReportMap((uint8_t*)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
-    hid_dev->setManufacturer("Anthropic");
-    // PnP ID: (vendorIdSource, vendorId, productId, version).
-    // Source 1 = Bluetooth SIG, vendor 0x02E5 = Espressif. Originally claimed
-    // Apple's USB vendor 0x05AC + Magic Keyboard product 0x820A — macOS
-    // validates Apple-claimed HIDs against known device IDs and silently
-    // refuses to surface a Connect button for spoofers.
-    hid_dev->setPnp(0x01, 0x02E5, 0x0001, 0x0100);
-    // country=33 (US ANSI). Setting this to 0 ("not supported") causes macOS
-    // to launch the Keyboard Setup Assistant on first pair asking the user
-    // to identify the layout — we only ever send Space / Shift+Tab so the
-    // physical layout is irrelevant; advertise a known one to skip the wizard.
-    hid_dev->setHidInfo(33, 0x02);
-    hid_dev->setBatteryLevel(100);
-    input_kbd = hid_dev->getInputReport(1);  // report ID 1
-
     // --- Custom data service ---
     NimBLEService* svc = server->createService(SERVICE_UUID);
 
@@ -215,12 +203,22 @@ void ble_init(void) {
     // ── Pet animation ──
     pet_anim_char = svc->createCharacteristic(
         PET_ANIM_CHAR_UUID,
-        NIMBLE_PROPERTY::WRITE     // WRITE (with response) supports fragmented long writes
-    );                              // Do NOT add WRITE_NR — long writes exceed MTU
+        NIMBLE_PROPERTY::WRITE
+    );
     static PetAnimCallbacks petAnimCb;
     pet_anim_char->setCallbacks(&petAnimCb);
 
     svc->start();
+
+    // --- HID keyboard service ---
+    hid_dev = new NimBLEHIDDevice(server);
+    hid_dev->setReportMap((uint8_t*)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
+    hid_dev->setManufacturer("Anthropic");
+    hid_dev->setPnp(0x01, 0x02E5, 0x0001, 0x0100);
+    hid_dev->setHidInfo(33, 0x02);
+    hid_dev->setBatteryLevel(100);
+    input_kbd = hid_dev->getInputReport(1);
+
     server->start();
     start_advertising();
 

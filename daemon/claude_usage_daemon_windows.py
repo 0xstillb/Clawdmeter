@@ -40,8 +40,16 @@ SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
-# Shared petdex engine for this process
+# Shared petdex engine for this process (keeps last pet selection for refresh)
 _pet_engine = PetdexEngine()
+_pet_engine.discover()
+_pet_active_slug: str | None = None       # set by tray on pet select
+_pet_active_state: str = "idle"
+_pet_refresh_interval = 5                # resend pet every 5s to recover from splash transition
+
+# Counter: how many pet refresh attempts since last successful write
+_pet_refresh_misses: int = 0
+_pet_refresh_miss_limit: int = 6          # after 30s of failures, stop spamming
 
 POLL_INTERVAL = 60
 TICK = 5
@@ -628,19 +636,32 @@ class Session:
 
     async def send_pet_animation(self, slug: str, state: str = "idle",
                                   hold_ms: int = 200) -> bool:
-        payload = _pet_engine.get_payload(slug, state, hold_ms)
+        # Empty slug means "clear pet" (Stop Pet menu)
+        if not slug:
+            if self.client and self.client.is_connected:
+                try:
+                    await self.client.write_gatt_char(
+                        PET_ANIM_CHAR_UUID, b"", response=True
+                    )
+                    log("Petdex: cleared")
+                    return True
+                except Exception as e:
+                    log(f"Petdex: clear failed: {e}")
+                    return False
+            return False
+
+        payload = _pet_engine.get_payload(slug, state, hold_ms, max_frames=1)
         if not payload:
-            log(f"Petdex: no data for '{slug}/{state}'")
+            log(f"Petdex: no payload for {slug}/{state}")
+            return False
+        if not self.client or not self.client.is_connected:
             return False
         try:
-            await self.client.write_gatt_char(
-                PET_ANIM_CHAR_UUID, payload, response=True   # MUST use response=True for write-long
-            )
-            log(f"Petdex: sent '{slug}/{state}' ({len(payload)} bytes / "
-                f"{payload[2] | (payload[3] << 8)} frames)")
+            await self.client.write_gatt_char(PET_ANIM_CHAR_UUID, payload, response=True)
+            log(f"Petdex: sent {len(payload)}B for {slug}/{state}")
             return True
         except Exception as e:
-            log(f"Petdex: write failed: {e}")
+            log(f"Petdex: send failed ({type(e).__name__}): {e}")
             return False
 
 
@@ -819,6 +840,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
     consecutive_failures = 0  # D-03: zombie-link break counter
+    last_pet_send: float | None = None  # pet animation refresh timer
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
@@ -879,7 +901,25 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     # as an auth problem (SC#5). Leave tray state unchanged; the next
                     # tick retries and set_connected() recovers it.
 
-            # Wake on a refresh request OR a stop, whichever comes first. Waking
+            # ── Pet animation refresh ────────────────────────────────────────
+            # Resend the current pet periodically so the display recovers if the
+            # pet buffer is cleared by splash transitions or idle cycles.
+            if _pet_active_slug is not None and session is not None:
+                if _pet_refresh_misses >= _pet_refresh_miss_limit:
+                    # After ~30s of failed pet writes, stop spamming.
+                    pass
+                elif last_pet_send is None or (now - last_pet_send) >= _pet_refresh_interval:
+                    last_pet_send = now
+                    async def _do_refresh(_slug=_pet_active_slug, _state=_pet_active_state) -> None:
+                        global _pet_refresh_misses
+                        ok = await session.send_pet_animation(_slug, _state, 200)
+                        if ok:
+                            _pet_refresh_misses = 0
+                        else:
+                            _pet_refresh_misses += 1
+                    asyncio.ensure_future(_do_refresh())
+
+            # Wake on a refresh request OR a stop, whichever comes first.
             # promptly on stop_event is what lets the finally below run
             # client.disconnect() before the process exits, so the peer gets a
             # clean GATT disconnect (returns to its waiting screen) instead of

@@ -232,6 +232,10 @@ static int16_t pair_scan_base = 0;
 static uint32_t s_pet_last_frame_ms = 0;
 static int      s_pet_frame = 0;
 
+// Deferred pet-changed flag: set in NimBLE callback, handled in main loop
+// to avoid LVGL invalidate work inside the BLE host task (TWDT reboots).
+static volatile bool s_pet_changed = false;
+
 static void compute_layout(const BoardCaps& c) {
     memset(&L, 0, sizeof(L));
     L.scr_w = c.width;
@@ -1553,7 +1557,8 @@ void ui_update(const UsageData* data) {
     set_usage_panel(&panel_bottom, &data->bottom, false);
 
     // Auto-return from splash when BLE data comes back
-    if (current_screen == SCREEN_SPLASH && data->valid) {
+    // (skip if user-selected petdex is shown — keep full-screen pet)
+    if (current_screen == SCREEN_SPLASH && data->valid && !pet_buffer_ready()) {
         ui_show_screen(SCREEN_USAGE);
         return;
     }
@@ -1762,6 +1767,17 @@ void ui_update_battery(int percent, bool charging) {
 }
 
 void ui_notify_pet_changed(void) {
+    // Only set a flag here; the actual LVGL work runs on the main loop
+    // because calling lv_obj_invalidate() from the NimBLE host task trips
+    // the task watchdog (CPU0 IDLE starvation -> reboot).
+    s_pet_changed = true;
+}
+
+// Handle deferred pet change on the main loop context.
+void ui_pet_tick(void) {
+    if (!s_pet_changed) return;
+    s_pet_changed = false;
+
     s_pet_last_frame_ms = millis();  // NOT 0 — avoids skipping frame 0
     s_pet_frame = 0;
     splash_notify_pet_changed();
@@ -1769,3 +1785,5 @@ void ui_notify_pet_changed(void) {
     render_hermes_idle_icon(idle_anim_phase);
     render_hermes_header_icon(view_state, header_anim_phase);
 }
+
+

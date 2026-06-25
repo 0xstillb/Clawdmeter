@@ -122,6 +122,19 @@ def header_text(ts: TrayState) -> str:
     return f"Error: {ts.reason}"
 
 
+def tray_title_text(ts: TrayState, max_len: int = 128) -> str:
+    """Return a Windows-safe tray tooltip/title string.
+
+    pystray's Win32 backend rejects titles longer than 128 chars.
+    """
+    text = header_text(ts)
+    if len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return text[:max_len]
+    return text[: max_len - 1] + "…"
+
+
 # ── Generic API key dialog ───────────────────────────────────────────────
 
 def _apikey_dialog(*, title: str, provider_id: str, cred_filename: str,
@@ -681,8 +694,49 @@ def main() -> None:
         async def _send() -> None:
             await ts.daemon_send_pet(slug, state, hold_ms)
             _pet_engine.active_slug = slug
+            # Tell the daemon to keep refreshing this pet
+            import daemon.claude_usage_daemon_windows as _dw
+            _dw._pet_active_slug = slug
+            _dw._pet_active_state = state
 
         _asyncio.run_coroutine_threadsafe(_send(), ts.loop)
+
+    def _on_stop_pet(_icon_ref, _item) -> None:
+        """Tell the daemon to stop sending periodic pet refreshes."""
+        import daemon.claude_usage_daemon_windows as _dw
+        _dw._pet_active_slug = None
+        _dw._pet_active_state = "idle"
+        _pet_engine.active_slug = None
+
+        async def _send_clear() -> None:
+            if ts.daemon_send_pet is None:
+                return
+            # Clear on device: write empty payload
+            try:
+                await ts.daemon_send_pet("", "idle", 200)
+            except Exception as e:
+                log(f"Stop Pet: clear failed: {e}")
+
+        if ts.loop is not None:
+            _asyncio.run_coroutine_threadsafe(_send_clear(), ts.loop)
+        log("Pet animation stopped")
+
+    def _build_petdex_menu() -> Menu:
+        _pet_engine.discover()
+        items = []
+        for slug, states in sorted(_pet_engine.pets.items()):
+            checked = (slug == _pet_engine.active_slug)
+            marker = "✓ " if checked else "  "
+            items.append(MenuItem(
+                f"{marker}{slug.capitalize()} ▶",
+                Menu(
+                    MenuItem("Select (1 frame)", _pet_select_action(slug)),
+                    MenuItem("Preview...", _pet_preview_action(slug)),
+                )
+            ))
+        if not items:
+            items.append(MenuItem("(no pets installed)", None, enabled=False))
+        return Menu(*items)
 
     def _preview_pet_popup(slug: str) -> None:
         """Show a 200x200 preview of the pet's first idle frame."""
@@ -726,37 +780,15 @@ def main() -> None:
 
         threading.Thread(target=_show, daemon=True).start()
 
-    def _on_seed_from_hermes(_icon_ref=None, _item=None) -> None:
-        """Discover installed pets in ~/.hermes/pets and copy them into pool."""
-        hermes_pets = Path.home() / ".hermes" / "pets"
-        if not hermes_pets.exists():
-            daemon_log("Petdex: no ~/.hermes/pets directory found")
-            return
-        for pet_dir in sorted(hermes_pets.iterdir()):
-            if not pet_dir.is_dir() or pet_dir.name.startswith("."):
-                continue
-            if _pet_engine.seed_from_hermes(pet_dir.name):
-                daemon_log(f"Petdex: seeded {pet_dir.name}")
-        _pet_engine.discover()
-        icon.update_menu()
+    def _pet_select_action(slug: str):
+        def _action(_icon_ref, _item) -> None:
+            _on_pet_select(slug, ("idle", 200))
+        return _action
 
-    def _build_petdex_menu() -> Menu:
-        _pet_engine.discover()
-        items = []
-        for slug, states in sorted(_pet_engine.pets.items()):
-            checked = (slug == _pet_engine.active_slug)
-            marker = "✓ " if checked else "  "
-            items.append(MenuItem(
-                f"{marker}{slug.capitalize()} ▶",
-                Menu(
-                    MenuItem("Select", lambda s=slug: _on_pet_select(s, ("idle", 200))),
-                    MenuItem("Preview...", lambda s=slug: _preview_pet_popup(s)),
-                )
-            ))
-        if not items:
-            items.append(MenuItem("(no pets installed)", None, enabled=False))
-        items.append(MenuItem("Seed from Hermes...", _on_seed_from_hermes))
-        return Menu(*items)
+    def _pet_preview_action(slug: str):
+        def _action(_icon_ref, _item) -> None:
+            _preview_pet_popup(slug)
+        return _action
 
     # --- background thread: asyncio loop ---
     def _run_daemon() -> None:
@@ -776,6 +808,14 @@ def main() -> None:
     daemon_thread.start()
 
     # --- menu ---
+    def _on_restart(_icon_ref, _item) -> None:
+        """Spawn new tray process, then kill this one (hot-reload)."""
+        import subprocess
+        pythonw = os.path.join(sys.base_exec_prefix, "pythonw.exe")
+        script = os.path.abspath(__file__)
+        subprocess.Popen([pythonw, script], cwd=os.getcwd())
+        os._exit(0)
+
     def _on_quit(_icon_ref, _item) -> None:
         """Kill process immediately so autostart restarts with fresh credentials."""
         os._exit(1)
@@ -830,6 +870,7 @@ def main() -> None:
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
         MenuItem("Provider", Menu(*(_provider_item(provider) for provider in discover_providers()))),
         MenuItem("Petdex Mascot", _build_petdex_menu()),
+        MenuItem("Stop Pet", _on_stop_pet),
         Menu.SEPARATOR,
         MenuItem("Credentials",
             Menu(
@@ -841,6 +882,7 @@ def main() -> None:
         ),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
+        MenuItem("Restart", _on_restart),
         MenuItem("Quit", _on_quit),
     )
 
@@ -861,7 +903,7 @@ def main() -> None:
             if state_changed or last_sync != prev_state["last_sync"]:
                 if state_changed:
                     _icon.icon = images[current]  # icon image depends on state only
-                _icon.title = header_text(ts)
+                _icon.title = tray_title_text(ts)
                 # D-04: toast ONLY on transition INTO error, not on every error tick.
                 if current == "error" and prev_state["state"] != "error":
                     _icon.notify(ts.reason or "Clawdmeter error", "Clawdmeter")
