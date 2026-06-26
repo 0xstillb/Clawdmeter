@@ -32,18 +32,32 @@ from bleak.exc import BleakError
 from daemon.config import PROVIDER_AUTO, auto_provider_ids, provider_preference
 from daemon.payloads import build_claude_usage_payload, build_codex_usage_payload, build_opencode_go_payload
 from daemon.plugin_runner import PluginRunner, PluginNotFoundError, PluginCrashedError
+from daemon.petdex.constants import PET_ANIM_CHAR_UUID
+from daemon.petdex.petdex_engine import PetdexEngine
 
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
+TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+
+# Shared petdex engine for this process (keeps last pet selection for refresh)
+_pet_engine = PetdexEngine()
+_pet_engine.discover()
+_pet_active_slug: str | None = None       # set by tray on pet select
+_pet_active_state: str = "idle"
+_pet_refresh_interval = 5                # resend pet every 5s to recover from splash transition
+
+# Counter: how many pet refresh attempts since last successful write
+_pet_refresh_misses: int = 0
+_pet_refresh_miss_limit: int = 6          # after 30s of failures, stop spamming
 
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 8.0
 CONNECT_RETRIES = 3        # D-01: attempts before giving up on a device
 CONNECT_RETRY_DELAY = 2.0  # D-01: seconds between failed connect attempts
-ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning a half-open link
+ZOMBIE_BREAK_LIMIT = 3     # D-03: consecutive write failures before abandoning a half-open link
                            # N=1: breaks at T=60s, leaves ~60s headroom for reconnect+poll inside 120s SLA
                            # N=2 would bust the 120s budget before reconnect even begins
 RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked retries inside 120s SLA
@@ -587,10 +601,42 @@ class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
         self.refresh_requested = asyncio.Event()
+        # Pet animation: background task cycles through frames at hold_ms intervals
+        self._pet_anim_task: asyncio.Task | None = None
+        self._pet_anim_running = False
+        # Current slug/state/hold for screen-driven pet switching
+        self._pet_slug: str | None = None
+        self._pet_state: str = "idle"
+        self._pet_hold_ms: int = 200
+
+    # Map device screen names → pet state names
+    _SCREEN_TO_PET_STATE = {
+        "splash": "jumping",
+        "usage": "review",
+    }
 
     def _on_refresh(self, _char, _data: bytearray) -> None:
         log("Refresh requested by device")
         self.refresh_requested.set()
+
+    def _on_screen_change(self, _char, data: bytearray) -> None:
+        """Called when device sends a screen state notification via tx_char."""
+        try:
+            msg = json.loads(data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        screen = msg.get("sc")
+        if not screen or not self._pet_slug:
+            return
+        pet_state = self._SCREEN_TO_PET_STATE.get(screen, "idle")
+        if pet_state == self._pet_state:
+            return  # already showing this state
+        log(f"Screen -> {screen}, pet state -> {pet_state}")
+        self._pet_state = pet_state
+        hold = 150 if pet_state == "review" else 200 if pet_state == "idle" else 120
+        asyncio.ensure_future(
+            self.send_pet_animation(self._pet_slug, pet_state, hold)
+        )
 
     async def setup_refresh_subscription(self) -> None:
         # The refresh subscription is optional — the 60s poll loop works without it.
@@ -603,6 +649,11 @@ class Session:
             await self.client.start_notify(REQ_CHAR_UUID, self._on_refresh)
         except (BleakError, ValueError, OSError) as e:
             log(f"Refresh subscription unavailable: {e}")
+        # Subscribe to screen-change notifications from the device
+        try:
+            await self.client.start_notify(TX_CHAR_UUID, self._on_screen_change)
+        except (BleakError, ValueError, OSError) as e:
+            log(f"Screen subscription unavailable: {e}")
 
     async def write_payload(self, payload: dict) -> bool:
         wire_payload = _payload_for_wire(payload)
@@ -620,6 +671,91 @@ class Session:
             # silent-freeze failure mode, SC#2 field report).
             log(f"Write failed: {e}")
             return False
+
+    async def send_pet_animation(self, slug: str, state: str = "idle",
+                                  hold_ms: int = 200) -> bool:
+        # Empty slug means "clear pet" (Stop Pet menu)
+        if not slug:
+            await self._stop_pet_anim()
+            if self.client and self.client.is_connected:
+                try:
+                    await self.client.write_gatt_char(
+                        PET_ANIM_CHAR_UUID, b"", response=True
+                    )
+                    log("Petdex: cleared")
+                    return True
+                except Exception as e:
+                    log(f"Petdex: clear failed: {e}")
+                    return False
+            return False
+
+        # Stop any running animation task (pet or state changed)
+        await self._stop_pet_anim()
+
+        # Get total frame count
+        total = _pet_engine.get_frame_count(slug, state)
+        if total == 0:
+            log(f"Petdex: no frames for {slug}/{state}")
+            return False
+
+        log(f"Petdex: starting animation for {slug}/{state} ({total} frames, hold={hold_ms}ms)")
+
+        # Save current pet info so screen-change callback can use it
+        self._pet_slug = slug
+        self._pet_state = state
+        self._pet_hold_ms = hold_ms
+
+        # Start background animation task
+        self._pet_anim_running = True
+        self._pet_anim_task = asyncio.create_task(
+            self._pet_anim_runner(slug, state, hold_ms, total)
+        )
+        return True
+
+    async def _pet_anim_runner(self, slug: str, state: str,
+                                hold_ms: int, total_frames: int) -> None:
+        """Background task: cycle through pet frames at hold_ms intervals."""
+        try:
+            frame = 0
+            retries = 0
+            max_retries = 3
+            while self._pet_anim_running and self.client and self.client.is_connected:
+                payload = _pet_engine.get_frame_payload(
+                    slug, state, hold_ms, frame, total_frames
+                )
+                if payload:
+                    try:
+                        async with asyncio.timeout(5.0):
+                            await self.client.write_gatt_char(
+                                PET_ANIM_CHAR_UUID, payload, response=True
+                            )
+                        retries = 0  # success — reset retry counter
+                    except (BleakError, OSError, asyncio.TimeoutError) as e:
+                        retries += 1
+                        if retries >= max_retries:
+                            log(f"Petdex: anim write failed after {retries} retries ({type(e).__name__}): {e}")
+                            break  # Stop — main loop watchdog restarts
+                        await asyncio.sleep(0.2 * retries)  # 200ms, 400ms, 600ms backoff
+                        continue  # retry same frame without advancing
+
+                frame = (frame + 1) % total_frames
+                await asyncio.sleep(hold_ms / 1000.0)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._pet_anim_running = False
+            log("Petdex: animation stopped")
+
+    async def _stop_pet_anim(self) -> None:
+        """Cancel the background animation task if running."""
+        self._pet_anim_running = False
+        if self._pet_anim_task:
+            self._pet_anim_task.cancel()
+            try:
+                await self._pet_anim_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._pet_anim_task = None
 
 
 def _extract_access_token(blob: str) -> str | None:
@@ -789,13 +925,33 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     log("Connected")
     session = Session(client)
     await session.setup_refresh_subscription()
+
+    # Health check: verify GATT services are actually accessible (WinRT can report
+    # is_connected=True while the link is half-open). Read a characteristic to
+    # confirm the GATT server is ready before entering the main loop.
+    try:
+        async with asyncio.timeout(3.0):
+            # Try reading the TX char — if service discovery never completed or
+            # the GATT server rejected us, this raises BleakError immediately.
+            await client.read_gatt_char(TX_CHAR_UUID)
+    except (BleakError, OSError, asyncio.TimeoutError) as e:
+        log(f"GATT health check failed: {e}")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return False
+    log("GATT health check passed")
+
     refresh_callback = session.refresh_requested.set
     if tray_state is not None:
         tray_state.refresh_callback = refresh_callback
+        tray_state.daemon_send_pet = session.send_pet_animation
 
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
     consecutive_failures = 0  # D-03: zombie-link break counter
+    last_pet_send: float | None = None  # pet animation refresh timer
     try:
         while client.is_connected and not stop_event.is_set():
             now = time.time()
@@ -836,7 +992,14 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                             tray_state.set_error(str(e))
 
                     if payload is not None:
-                        if await session.write_payload(payload):
+                        write_ok = False
+                        for wretry in range(3):
+                            if await session.write_payload(payload):
+                                write_ok = True
+                                break
+                            log(f"Retrying payload write ({wretry+1}/3)...")
+                            await asyncio.sleep(0.5 * (wretry + 1))
+                        if write_ok:
                             last_poll = time.time()
                             used_successfully = True
                             consecutive_failures = 0  # D-03: reset on success
@@ -856,7 +1019,22 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                     # as an auth problem (SC#5). Leave tray state unchanged; the next
                     # tick retries and set_connected() recovers it.
 
-            # Wake on a refresh request OR a stop, whichever comes first. Waking
+            # ── Pet animation watchdog ───────────────────────────────────────
+            # The background animation task (started by send_pet_animation)
+            # continuously cycles through frames. If it has died (e.g. BLE write
+            # failure), restart it here. The 5-second tick is coarse, but the
+            # animation task itself runs at hold_ms intervals.
+            if _pet_active_slug is not None and session is not None:
+                if not session._pet_anim_running:
+                    slug = session._pet_slug or _pet_active_slug
+                    state = session._pet_state or _pet_active_state
+                    hold = session._pet_hold_ms or 200
+                    log(f"Petdex: animation task dead, restarting {slug}/{state}")
+                    asyncio.ensure_future(
+                        session.send_pet_animation(slug, state, hold)
+                    )
+
+            # Wake on a refresh request OR a stop, whichever comes first.
             # promptly on stop_event is what lets the finally below run
             # client.disconnect() before the process exits, so the peer gets a
             # clean GATT disconnect (returns to its waiting screen) instead of
@@ -865,6 +1043,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     finally:
         if tray_state is not None and tray_state.refresh_callback is refresh_callback:
             tray_state.refresh_callback = None
+            tray_state.daemon_send_pet = None
         # Clean GATT disconnect on the way out — this is what tells the peripheral
         # the link is gone. WinRT can surface a raw OSError (not BleakError) here,
         # so swallow both; the link tears down regardless once we exit.

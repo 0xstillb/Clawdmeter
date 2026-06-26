@@ -1,4 +1,6 @@
 #include "ble.h"
+#include "pet_buffer.h"
+#include "ui.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
@@ -60,6 +62,7 @@ static NimBLECharacteristic* input_kbd = nullptr;
 static NimBLECharacteristic* tx_char = nullptr;
 static NimBLECharacteristic* rx_char = nullptr;
 static NimBLECharacteristic* req_char = nullptr;
+static NimBLECharacteristic* pet_anim_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
@@ -105,6 +108,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         Serial.printf("BLE: connected from %s (active=%u)\n",
             info.getAddress().toString().c_str(),
             (unsigned)s->getConnectedCount());
+        // Notify daemon of current screen right after connection so pet
+        // state (jumping/review/idle) matches the display immediately.
+        ble_send_screen(ui_get_current_screen() == SCREEN_SPLASH ? "splash" : "usage");
         // Keep advertising while a connection slot is still free so a second
         // central (e.g. the host daemon alongside an OS-held HID link) can
         // discover and connect. NimBLE auto-stops advertising on each accept.
@@ -131,6 +137,20 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         rx_buf[len] = '\0';
         data_ready = true;
         has_received_data = true;
+    }
+};
+
+class PetAnimCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
+        std::string val = chr->getValue();
+        if (val.empty()) {
+            pet_buffer_clear();
+            Serial.println("BLE: pet cleared (empty payload)");
+        } else {
+            pet_buffer_load((const uint8_t*)val.data(), val.length());
+            // Apply immediately via tick so the new frame shows up next render
+        }
+        ui_notify_pet_changed();
     }
 };
 
@@ -161,24 +181,6 @@ void ble_init(void) {
     static ServerCallbacks serverCb;
     server->setCallbacks(&serverCb);
 
-    // --- HID keyboard service ---
-    hid_dev = new NimBLEHIDDevice(server);
-    hid_dev->setReportMap((uint8_t*)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
-    hid_dev->setManufacturer("Anthropic");
-    // PnP ID: (vendorIdSource, vendorId, productId, version).
-    // Source 1 = Bluetooth SIG, vendor 0x02E5 = Espressif. Originally claimed
-    // Apple's USB vendor 0x05AC + Magic Keyboard product 0x820A — macOS
-    // validates Apple-claimed HIDs against known device IDs and silently
-    // refuses to surface a Connect button for spoofers.
-    hid_dev->setPnp(0x01, 0x02E5, 0x0001, 0x0100);
-    // country=33 (US ANSI). Setting this to 0 ("not supported") causes macOS
-    // to launch the Keyboard Setup Assistant on first pair asking the user
-    // to identify the layout — we only ever send Space / Shift+Tab so the
-    // physical layout is irrelevant; advertise a known one to skip the wizard.
-    hid_dev->setHidInfo(33, 0x02);
-    hid_dev->setBatteryLevel(100);
-    input_kbd = hid_dev->getInputReport(1);  // report ID 1
-
     // --- Custom data service ---
     NimBLEService* svc = server->createService(SERVICE_UUID);
 
@@ -201,7 +203,25 @@ void ble_init(void) {
     static ReqCallbacks reqCb;
     req_char->setCallbacks(&reqCb);
 
+    // ── Pet animation ──
+    pet_anim_char = svc->createCharacteristic(
+        PET_ANIM_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE
+    );
+    static PetAnimCallbacks petAnimCb;
+    pet_anim_char->setCallbacks(&petAnimCb);
+
     svc->start();
+
+    // --- HID keyboard service ---
+    hid_dev = new NimBLEHIDDevice(server);
+    hid_dev->setReportMap((uint8_t*)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
+    hid_dev->setManufacturer("Anthropic");
+    hid_dev->setPnp(0x01, 0x02E5, 0x0001, 0x0100);
+    hid_dev->setHidInfo(33, 0x02);
+    hid_dev->setBatteryLevel(100);
+    input_kbd = hid_dev->getInputReport(1);
+
     server->start();
     start_advertising();
 
@@ -270,6 +290,15 @@ void ble_request_refresh(void) {
         req_char->notify();
         Serial.println("BLE: refresh requested");
     }
+}
+
+void ble_send_screen(const char* screen_name) {
+    if (state != BLE_STATE_CONNECTED || !tx_char) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"sc\":\"%s\"}", screen_name);
+    tx_char->setValue(buf);
+    tx_char->notify();
+    Serial.printf("BLE: screen -> %s\n", screen_name);
 }
 
 void ble_keyboard_press(uint8_t key, uint8_t modifier) {

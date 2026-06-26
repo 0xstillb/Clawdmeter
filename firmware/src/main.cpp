@@ -12,6 +12,7 @@
 #include "idle.h"
 #include "idle_cfg.h"
 #include "brightness.h"
+#include "pet_buffer.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -257,6 +258,9 @@ void setup() {
     input_hal_init();
 
     ui_init();
+    if (!pet_buffer_alloc()) {
+        Serial.println("pet_buffer: alloc failed — pets disabled");
+    }
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
     ui_show_screen(SCREEN_SPLASH);
@@ -438,6 +442,8 @@ void loop() {
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
+    pet_buffer_tick();  // apply BLE-staged pet data on main loop context
+    ui_pet_tick();      // handle deferred pet-changed LVGL work on main loop context
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
@@ -534,7 +540,7 @@ void loop() {
                 if (g_after != g_before) {
                     Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
                         g_before, g_after, usage.top.pct);
-                    if (splash_is_active()) splash_pick_for_current_rate();
+                    if (splash_is_active() && !pet_buffer_ready()) splash_pick_for_current_rate();
                 }
             }
             ui_update(&usage);

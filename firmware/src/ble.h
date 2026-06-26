@@ -20,6 +20,9 @@ const char* ble_get_data(void);
 void ble_send_ack(void);
 void ble_send_nack(void);
 void ble_request_refresh(void);
+void ble_send_screen(const char* screen_name);
+
+#define PET_ANIM_CHAR_UUID  "4c41555a-4465-7669-6365-000000000005"
 
 // BLE HID keyboard
 void ble_keyboard_press(uint8_t key, uint8_t modifier);

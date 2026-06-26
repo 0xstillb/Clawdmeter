@@ -1,4 +1,5 @@
 #include "splash.h"
+#include "pet_buffer.h"
 #include "splash_animations.h"
 #include "theme.h"
 #include "usage_rate.h"
@@ -27,6 +28,10 @@ static uint32_t frame_started_ms = 0;
 static uint32_t last_pick_ms = 0;
 static bool active = false;
 static uint8_t splash_phase = 0;
+
+// Splash pet frame state (reset when pet changes)
+static uint32_t s_splash_pet_timer = 0;
+static int      s_splash_pet_frame = 0;
 
 // Prepaid balance override (-1 = use rate-based picking)
 static int g_prepaid_balance = -1;
@@ -79,8 +84,7 @@ static void put_square(int x, int y, int size, uint16_t color) {
 
 static void render_hermes_splash(void) {
     if (!canvas_buf) return;
-    const uint16_t bg = rgb565(0x050608);
-    const uint16_t grid = rgb565(0x080b12);
+    const uint16_t bg = rgb565(0x000000);
     const uint16_t body = rgb565(0xece6db);
     const uint16_t shade = rgb565(0xdedad0);
     const uint16_t blue = rgb565(0x5a7aff);
@@ -88,25 +92,39 @@ static void render_hermes_splash(void) {
 
     for (int i = 0; i < canvas_w * canvas_h; ++i) canvas_buf[i] = bg;
 
-    for (int y = 0; y < canvas_h; y += 14) {
-        for (int x = 0; x < canvas_w; ++x) canvas_buf[y * canvas_w + x] = grid;
-    }
-    for (int x = 0; x < canvas_w; x += 14) {
-        for (int y = 0; y < canvas_h; ++y) canvas_buf[y * canvas_w + x] = grid;
-    }
-
     const int px = (canvas_w >= 180) ? 7 : 6;
     const int art_w = 20 * px;
     const int ox = (canvas_w - art_w) / 2;
     const int oy = (canvas_h - art_w) / 2 + ((splash_phase % 24) < 12 ? 0 : 1);
-    for (int y = 0; y < 20; ++y) {
-        for (int x = 0; x < 20; ++x) {
-            char code = HERMES_SPLASH_FRAME[y * 20 + x];
-            if (code == '0') continue;
-            put_square(ox + x * px, oy + y * px, px, code == '2' ? shade : body);
+
+    if (pet_buffer_ready()) {
+        // ══ Pet (frame 0, static) ══
+        // Splash shows one still frame. Different moods come from daemon
+        // sending different state data (idle/run/error).
+        const uint8_t* frame = pet_buffer_frame(0);
+        if (frame) {
+            for (int y = 0; y < 20; ++y) {
+                for (int x = 0; x < 20; ++x) {
+                    uint8_t idx = frame[y * 20 + x];
+                    // All indices are opaque
+                    put_square(ox + x * px, oy + y * px, px,
+                        pet_buffer_palette()[idx]);
+                }
+            }
+        }
+    } else {
+        // ══ Fallback: Hermes face (existing code) ══
+        for (int y = 0; y < 20; ++y) {
+            for (int x = 0; x < 20; ++x) {
+                char code = HERMES_SPLASH_FRAME[y * 20 + x];
+                if (code == '0') continue;
+                put_square(ox + x * px, oy + y * px, px,
+                    code == '2' ? shade : body);
+            }
         }
     }
 
+    // ── Particles (unchanged) ──
     if ((cur_anim & 1) == 0) {
         const int t = splash_phase % 48;
         for (int i = 0; i < 4; ++i) {
@@ -216,7 +234,7 @@ void splash_init(lv_obj_t *parent) {
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, c.width, c.height);
     lv_obj_set_pos(splash_container, 0, 0);
-    lv_obj_set_style_bg_color(splash_container, lv_color_hex(0x050608), 0);
+    lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(splash_container, 0, 0);
     lv_obj_set_style_pad_all(splash_container, 0, 0);
@@ -236,7 +254,8 @@ void splash_tick(void) {
     if (!active) return;
 
     // Auto-rotate to the next animation in the current group.
-    if (millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+    // Skip if a user-selected pet is loaded (petdex override).
+    if (!pet_buffer_ready() && millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
         splash_pick_for_current_rate();
     }
 
@@ -287,6 +306,9 @@ bool splash_is_active(void) { return active; }
 void splash_show(void) {
     if (g_prepaid_balance >= 0) {
         splash_pick_for_prepaid(g_prepaid_balance);
+    } else if (pet_buffer_ready()) {
+        // Keep the pet visible — don't select Hermes animation
+        render_hermes_splash();
     } else {
         splash_pick_for_current_rate();
     }
@@ -304,6 +326,11 @@ lv_obj_t* splash_get_root(void) {
 }
 void splash_set_hint(const char* text) {
     (void)text;
+}
+
+void splash_notify_pet_changed(void) {
+    s_splash_pet_timer = millis();
+    s_splash_pet_frame = 0;
 }
 
 void splash_show_hint(bool show) {

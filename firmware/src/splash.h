@@ -35,6 +35,7 @@ bool splash_is_active(void);
 // Hint hooks are kept as no-ops for compatibility with main.cpp's pairing UX.
 void splash_set_hint(const char* text);
 void splash_show_hint(bool show);
+void splash_notify_pet_changed(void);
 lv_obj_t* splash_get_root(void);
 
 // Mini animated creature for embedding elsewhere (e.g. the idle screen).

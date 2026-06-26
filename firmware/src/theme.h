@@ -4,7 +4,7 @@
 // Hermes-inspired design tokens used by the small-screen 2432S028 UI refresh.
 // Keep the aliases below so older shared code keeps compiling while the newer
 // screens can opt into the richer palette directly.
-#define THEME_BG         lv_color_hex(0x08090c)
+#define THEME_BG         lv_color_hex(0x000000)
 #define THEME_PANEL      lv_color_hex(0x262a33)
 #define THEME_PANEL_ALT  lv_color_hex(0x1c2028)
 #define THEME_PANEL_EDGE lv_color_hex(0x5c6678)

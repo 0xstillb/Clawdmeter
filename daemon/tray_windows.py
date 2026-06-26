@@ -69,6 +69,7 @@ class TrayState:
         self.loop = None        # asyncio running loop (for call_soon_threadsafe)
         self.stop_event = None  # asyncio.Event (the existing clean-shutdown hook)
         self.refresh_callback = None  # callable that pokes the active session poll loop
+        self.daemon_send_pet = None   # async callable (slug, state, hold_ms) -> bool
 
     def set_connected(self, ts: float) -> None:
         """Called after write_payload returns True.  ts = time.time()."""
@@ -119,6 +120,19 @@ def header_text(ts: TrayState) -> str:
     if ts.state == "scanning":
         return "Scanning…"   # "Scanning…"
     return f"Error: {ts.reason}"
+
+
+def tray_title_text(ts: TrayState, max_len: int = 128) -> str:
+    """Return a Windows-safe tray tooltip/title string.
+
+    pystray's Win32 backend rejects titles longer than 128 chars.
+    """
+    text = header_text(ts)
+    if len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return text[:max_len]
+    return text[: max_len - 1] + "…"
 
 
 # ── Generic API key dialog ───────────────────────────────────────────────
@@ -659,6 +673,7 @@ def main() -> None:
     import daemon.autostart_windows as autostart
     from daemon.config import discover_providers, provider_preference, set_provider
     from daemon.claude_usage_daemon_windows import main as daemon_main, log as daemon_log
+    from daemon.petdex.petdex_engine import PetdexEngine, POOL_DIR
     from daemon.icon_assets import load_logo_rgba, build_state_icons
 
     # Build per-state icons once at startup; swap icon.icon per tick (never recomposite).
@@ -667,6 +682,113 @@ def main() -> None:
 
     ts = TrayState()
     icon = pystray.Icon("Clawdmeter", images["scanning"], "Clawdmeter")
+    _pet_engine = PetdexEngine()
+    _pet_engine.discover()
+
+    # --- Petdex helpers ---
+    def _on_pet_select(slug: str, state_and_hold: tuple[str, int]) -> None:
+        if ts.loop is None or ts.daemon_send_pet is None:
+            return
+        state, hold_ms = state_and_hold
+
+        async def _send() -> None:
+            await ts.daemon_send_pet(slug, state, hold_ms)
+            _pet_engine.active_slug = slug
+            # Tell the daemon to keep refreshing this pet
+            import daemon.claude_usage_daemon_windows as _dw
+            _dw._pet_active_slug = slug
+            _dw._pet_active_state = state
+
+        _asyncio.run_coroutine_threadsafe(_send(), ts.loop)
+
+    def _on_stop_pet(_icon_ref, _item) -> None:
+        """Tell the daemon to stop sending periodic pet refreshes."""
+        import daemon.claude_usage_daemon_windows as _dw
+        _dw._pet_active_slug = None
+        _dw._pet_active_state = "idle"
+        _pet_engine.active_slug = None
+
+        async def _send_clear() -> None:
+            if ts.daemon_send_pet is None:
+                return
+            # Clear on device: write empty payload
+            try:
+                await ts.daemon_send_pet("", "idle", 200)
+            except Exception as e:
+                log(f"Stop Pet: clear failed: {e}")
+
+        if ts.loop is not None:
+            _asyncio.run_coroutine_threadsafe(_send_clear(), ts.loop)
+        log("Pet animation stopped")
+
+    def _build_petdex_menu() -> Menu:
+        _pet_engine.discover()
+        items = []
+        for slug, states in sorted(_pet_engine.pets.items()):
+            checked = (slug == _pet_engine.active_slug)
+            marker = "✓ " if checked else "  "
+            items.append(MenuItem(
+                f"{marker}{slug.capitalize()} ▶",
+                Menu(
+                    MenuItem("Apply", _pet_select_action(slug)),
+                    MenuItem("Preview...", _pet_preview_action(slug)),
+                )
+            ))
+        if not items:
+            items.append(MenuItem("(no pets installed)", None, enabled=False))
+        return Menu(*items)
+
+    def _preview_pet_popup(slug: str) -> None:
+        """Show a 200x200 preview of the pet's first idle frame."""
+        import tkinter as tk
+        from PIL import Image, ImageTk
+
+        state_dir = POOL_DIR / slug / "idle"
+        pngs = sorted(state_dir.glob("*.png"))
+        if not pngs:
+            return
+
+        img = Image.open(pngs[0]).convert("RGB").resize((200, 200), Image.Resampling.NEAREST)
+
+        def _show() -> None:
+            root = tk.Tk()
+            root.title(f"Petdex: {slug.capitalize()}")
+            root.configure(bg="#050608")
+            root.resizable(False, False)
+
+            tk_img = ImageTk.PhotoImage(img)
+            lbl = tk.Label(root, image=tk_img, bg="#050608")
+            lbl.image = tk_img  # CRITICAL: prevent GC
+            lbl.pack(padx=16, pady=(16, 8))
+
+            btn_frame = tk.Frame(root, bg="#050608")
+            btn_frame.pack(pady=(4, 12))
+
+            tk.Button(btn_frame, text="Apply", width=10,
+                      command=lambda: (_on_pet_select(slug, ("idle", 200)), root.destroy())
+                      ).pack(side=tk.LEFT, padx=4)
+            tk.Button(btn_frame, text="Close", width=10,
+                      command=root.destroy).pack(side=tk.LEFT, padx=4)
+
+            # Center on screen
+            root.update_idletasks()
+            x = (root.winfo_screenwidth() - root.winfo_width()) // 2
+            y = (root.winfo_screenheight() - root.winfo_height()) // 2
+            root.geometry(f"+{x}+{y}")
+
+            root.mainloop()
+
+        threading.Thread(target=_show, daemon=True).start()
+
+    def _pet_select_action(slug: str):
+        def _action(_icon_ref, _item) -> None:
+            _on_pet_select(slug, ("idle", 200))
+        return _action
+
+    def _pet_preview_action(slug: str):
+        def _action(_icon_ref, _item) -> None:
+            _preview_pet_popup(slug)
+        return _action
 
     # --- background thread: asyncio loop ---
     def _run_daemon() -> None:
@@ -686,6 +808,14 @@ def main() -> None:
     daemon_thread.start()
 
     # --- menu ---
+    def _on_restart(_icon_ref, _item) -> None:
+        """Spawn new tray process, then kill this one (hot-reload)."""
+        import subprocess
+        pythonw = os.path.join(sys.base_exec_prefix, "pythonw.exe")
+        script = os.path.abspath(__file__)
+        subprocess.Popen([pythonw, script], cwd=os.getcwd())
+        os._exit(0)
+
     def _on_quit(_icon_ref, _item) -> None:
         """Kill process immediately so autostart restarts with fresh credentials."""
         os._exit(1)
@@ -739,6 +869,8 @@ def main() -> None:
         # Non-clickable status header; text updates via update_menu() on state change.
         MenuItem(lambda _item: header_text(ts), None, enabled=False),
         MenuItem("Provider", Menu(*(_provider_item(provider) for provider in discover_providers()))),
+        MenuItem("Petdex Mascot", _build_petdex_menu()),
+        MenuItem("Stop Pet", _on_stop_pet),
         Menu.SEPARATOR,
         MenuItem("Credentials",
             Menu(
@@ -750,6 +882,7 @@ def main() -> None:
         ),
         # Start-at-login toggle: checked= is a CALLABLE for live query (Pitfall 6).
         MenuItem("Start at login", _on_toggle, checked=lambda _item: autostart.is_enabled()),
+        MenuItem("Restart", _on_restart),
         MenuItem("Quit", _on_quit),
     )
 
@@ -770,7 +903,7 @@ def main() -> None:
             if state_changed or last_sync != prev_state["last_sync"]:
                 if state_changed:
                     _icon.icon = images[current]  # icon image depends on state only
-                _icon.title = header_text(ts)
+                _icon.title = tray_title_text(ts)
                 # D-04: toast ONLY on transition INTO error, not on every error tick.
                 if current == "error" and prev_state["state"] != "error":
                     _icon.notify(ts.reason or "Clawdmeter error", "Clawdmeter")

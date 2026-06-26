@@ -20,3 +20,8 @@ bool ui_is_ble_connected(void);
 int ui_get_view_state(void);
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac);
 void ui_update_battery(int percent, bool charging);
+
+// Called from BLE callback when new pet animation arrives
+void ui_notify_pet_changed(void);
+// Called from main loop to apply the deferred pet change (LVGL work)
+void ui_pet_tick(void);
