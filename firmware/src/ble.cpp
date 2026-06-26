@@ -108,6 +108,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         Serial.printf("BLE: connected from %s (active=%u)\n",
             info.getAddress().toString().c_str(),
             (unsigned)s->getConnectedCount());
+        // Notify daemon of current screen right after connection so pet
+        // state (jumping/review/idle) matches the display immediately.
+        ble_send_screen(ui_get_current_screen() == SCREEN_SPLASH ? "splash" : "usage");
         // Keep advertising while a connection slot is still free so a second
         // central (e.g. the host daemon alongside an OS-held HID link) can
         // discover and connect. NimBLE auto-stops advertising on each accept.

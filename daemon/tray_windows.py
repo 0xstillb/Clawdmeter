@@ -730,7 +730,7 @@ def main() -> None:
             items.append(MenuItem(
                 f"{marker}{slug.capitalize()} ▶",
                 Menu(
-                    MenuItem("Select (1 frame)", _pet_select_action(slug)),
+                    MenuItem("Apply", _pet_select_action(slug)),
                     MenuItem("Preview...", _pet_preview_action(slug)),
                 )
             ))
@@ -764,7 +764,7 @@ def main() -> None:
             btn_frame = tk.Frame(root, bg="#050608")
             btn_frame.pack(pady=(4, 12))
 
-            tk.Button(btn_frame, text="Select", width=10,
+            tk.Button(btn_frame, text="Apply", width=10,
                       command=lambda: (_on_pet_select(slug, ("idle", 200)), root.destroy())
                       ).pack(side=tk.LEFT, padx=4)
             tk.Button(btn_frame, text="Close", width=10,

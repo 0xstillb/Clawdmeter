@@ -57,7 +57,7 @@ TICK = 5
 SCAN_TIMEOUT = 8.0
 CONNECT_RETRIES = 3        # D-01: attempts before giving up on a device
 CONNECT_RETRY_DELAY = 2.0  # D-01: seconds between failed connect attempts
-ZOMBIE_BREAK_LIMIT = 1     # D-03: consecutive write failures before abandoning a half-open link
+ZOMBIE_BREAK_LIMIT = 3     # D-03: consecutive write failures before abandoning a half-open link
                            # N=1: breaks at T=60s, leaves ~60s headroom for reconnect+poll inside 120s SLA
                            # N=2 would bust the 120s budget before reconnect even begins
 RECONNECT_BACKOFF_CAP = 8  # D-05: fast-reconnect cap (seconds); keeps stacked retries inside 120s SLA
@@ -717,18 +717,26 @@ class Session:
         """Background task: cycle through pet frames at hold_ms intervals."""
         try:
             frame = 0
+            retries = 0
+            max_retries = 3
             while self._pet_anim_running and self.client and self.client.is_connected:
                 payload = _pet_engine.get_frame_payload(
                     slug, state, hold_ms, frame, total_frames
                 )
                 if payload:
                     try:
-                        await self.client.write_gatt_char(
-                            PET_ANIM_CHAR_UUID, payload, response=True
-                        )
-                    except Exception as e:
-                        log(f"Petdex: anim write failed ({type(e).__name__}): {e}")
-                        break  # Stop on write failure — main loop watchdog restarts
+                        async with asyncio.timeout(5.0):
+                            await self.client.write_gatt_char(
+                                PET_ANIM_CHAR_UUID, payload, response=True
+                            )
+                        retries = 0  # success — reset retry counter
+                    except (BleakError, OSError, asyncio.TimeoutError) as e:
+                        retries += 1
+                        if retries >= max_retries:
+                            log(f"Petdex: anim write failed after {retries} retries ({type(e).__name__}): {e}")
+                            break  # Stop — main loop watchdog restarts
+                        await asyncio.sleep(0.2 * retries)  # 200ms, 400ms, 600ms backoff
+                        continue  # retry same frame without advancing
 
                 frame = (frame + 1) % total_frames
                 await asyncio.sleep(hold_ms / 1000.0)
@@ -917,6 +925,24 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
     log("Connected")
     session = Session(client)
     await session.setup_refresh_subscription()
+
+    # Health check: verify GATT services are actually accessible (WinRT can report
+    # is_connected=True while the link is half-open). Read a characteristic to
+    # confirm the GATT server is ready before entering the main loop.
+    try:
+        async with asyncio.timeout(3.0):
+            # Try reading the TX char — if service discovery never completed or
+            # the GATT server rejected us, this raises BleakError immediately.
+            await client.read_gatt_char(TX_CHAR_UUID)
+    except (BleakError, OSError, asyncio.TimeoutError) as e:
+        log(f"GATT health check failed: {e}")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        return False
+    log("GATT health check passed")
+
     refresh_callback = session.refresh_requested.set
     if tray_state is not None:
         tray_state.refresh_callback = refresh_callback
@@ -966,7 +992,14 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                             tray_state.set_error(str(e))
 
                     if payload is not None:
-                        if await session.write_payload(payload):
+                        write_ok = False
+                        for wretry in range(3):
+                            if await session.write_payload(payload):
+                                write_ok = True
+                                break
+                            log(f"Retrying payload write ({wretry+1}/3)...")
+                            await asyncio.sleep(0.5 * (wretry + 1))
+                        if write_ok:
                             last_poll = time.time()
                             used_successfully = True
                             consecutive_failures = 0  # D-03: reset on success
