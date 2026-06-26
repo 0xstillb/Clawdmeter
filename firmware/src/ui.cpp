@@ -1154,7 +1154,7 @@ static void style_pair_step(lv_obj_t* step, int state) {
     lv_color_t text = state == 1 ? COL_TEXT : (state == 2 ? COL_TEXT : COL_DIM);
     if (L.mode == LAYOUT_LANDSCAPE_SMALL) {
         border = state == 1 ? COL_BLUE : lv_color_hex(0x3a3c40);
-        fill = state == 1 ? lv_color_hex(0x1a2440) : COL_SCREEN;
+        fill = state == 1 ? lv_color_hex(0x1a2440) : COL_BG;
         text = state == 1 ? COL_TEXT : (state == 2 ? COL_BLUE : COL_DIM);
     }
     lv_obj_set_style_bg_color(step, fill, 0);
@@ -1227,6 +1227,8 @@ static void build_pair_group(lv_obj_t* parent) {
 
 static void build_idle_group(lv_obj_t* parent) {
     idle_group = make_transparent_box(parent, 0, 0, L.scr_w, L.scr_h);
+    lv_obj_set_style_bg_opa(idle_group, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(idle_group, COL_BG, 0);
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     idle_glow_obj = lv_obj_create(idle_group);
@@ -1383,9 +1385,9 @@ static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
     lv_obj_set_pos(usage_container, 0, 0);
-    lv_obj_set_style_bg_color(usage_container, L.mode == LAYOUT_LANDSCAPE_SMALL ? lv_color_hex(0x0d1016) : COL_SCREEN, 0);
+    lv_obj_set_style_bg_color(usage_container, COL_BG, 0);
     lv_obj_set_style_bg_opa(usage_container, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_grad_color(usage_container, COL_SCREEN, 0);
+    lv_obj_set_style_bg_grad_color(usage_container, COL_BG, 0);
     lv_obj_set_style_bg_grad_dir(usage_container, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_border_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
@@ -1395,8 +1397,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     usage_bg_glow = lv_obj_create(usage_container);
     lv_obj_set_size(usage_bg_glow, L.scr_w - 38, 92);
     lv_obj_align(usage_bg_glow, LV_ALIGN_TOP_MID, 0, -28);
-    lv_obj_set_style_bg_color(usage_bg_glow, COL_BLUE, 0);
-    lv_obj_set_style_bg_opa(usage_bg_glow, (lv_opa_t)11, 0);
+    lv_obj_set_style_bg_color(usage_bg_glow, COL_BG, 0);
+    lv_obj_set_style_bg_opa(usage_bg_glow, (lv_opa_t)8, 0);
     lv_obj_set_style_border_width(usage_bg_glow, 0, 0);
     lv_obj_set_style_radius(usage_bg_glow, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_shadow_width(usage_bg_glow, 44, 0);
@@ -1405,7 +1407,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_bg_glow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_move_background(usage_bg_glow);
 
-    build_screen_grid(usage_container);
+    // build_screen_grid(usage_container);  // removed
 
     header_group = make_transparent_box(usage_container, 0, 0, L.scr_w, L.header_h + L.pad_t);
 
@@ -1699,6 +1701,7 @@ void ui_show_screen(screen_t screen) {
     current_screen = screen;
     s_last_screen_change = lv_tick_get();
     if (screen == SCREEN_SPLASH) {
+        ble_send_screen("splash");
         forced_view_override = -1;
         if (!splash_get_root()) {
             current_screen = SCREEN_USAGE;
@@ -1713,6 +1716,7 @@ void ui_show_screen(screen_t screen) {
     }
 
     splash_hide();
+    ble_send_screen("usage");
     if (usage_container) lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     update_view_state();
 }

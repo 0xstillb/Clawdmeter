@@ -289,6 +289,15 @@ void ble_request_refresh(void) {
     }
 }
 
+void ble_send_screen(const char* screen_name) {
+    if (state != BLE_STATE_CONNECTED || !tx_char) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"sc\":\"%s\"}", screen_name);
+    tx_char->setValue(buf);
+    tx_char->notify();
+    Serial.printf("BLE: screen -> %s\n", screen_name);
+}
+
 void ble_keyboard_press(uint8_t key, uint8_t modifier) {
     if (state != BLE_STATE_CONNECTED || !input_kbd) return;
     // HID report: [modifier, reserved, key1, key2, key3, key4, key5, key6]

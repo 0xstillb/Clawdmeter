@@ -84,21 +84,13 @@ static void put_square(int x, int y, int size, uint16_t color) {
 
 static void render_hermes_splash(void) {
     if (!canvas_buf) return;
-    const uint16_t bg = rgb565(0x050608);
-    const uint16_t grid = rgb565(0x080b12);
+    const uint16_t bg = rgb565(0x000000);
     const uint16_t body = rgb565(0xece6db);
     const uint16_t shade = rgb565(0xdedad0);
     const uint16_t blue = rgb565(0x5a7aff);
     const uint16_t yellow = rgb565(0xffd53d);
 
     for (int i = 0; i < canvas_w * canvas_h; ++i) canvas_buf[i] = bg;
-
-    for (int y = 0; y < canvas_h; y += 14) {
-        for (int x = 0; x < canvas_w; ++x) canvas_buf[y * canvas_w + x] = grid;
-    }
-    for (int x = 0; x < canvas_w; x += 14) {
-        for (int y = 0; y < canvas_h; ++y) canvas_buf[y * canvas_w + x] = grid;
-    }
 
     const int px = (canvas_w >= 180) ? 7 : 6;
     const int art_w = 20 * px;
@@ -242,7 +234,7 @@ void splash_init(lv_obj_t *parent) {
     splash_container = lv_obj_create(parent);
     lv_obj_set_size(splash_container, c.width, c.height);
     lv_obj_set_pos(splash_container, 0, 0);
-    lv_obj_set_style_bg_color(splash_container, lv_color_hex(0x050608), 0);
+    lv_obj_set_style_bg_color(splash_container, THEME_BG, 0);
     lv_obj_set_style_bg_opa(splash_container, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(splash_container, 0, 0);
     lv_obj_set_style_pad_all(splash_container, 0, 0);

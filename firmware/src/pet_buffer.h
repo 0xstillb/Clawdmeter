@@ -4,13 +4,13 @@
 
 #define PET_GRID 20
 #define PET_CELLS 400 // 20 × 20
-#define PET_PAL_MAX 10
+#define PET_PAL_MAX 16
 #define PET_MAX_FRAMES 48
 #define PET_MAX_FRAMES_STORED 1    // Store only 1 frame (matches what daemon sends)
 #define PET_BUF_BYTES (PET_MAX_FRAMES_STORED * PET_CELLS) // 400
 
-// BLE payload header: hold_ms(2) + frame_count(2) + palette(20)
-#define PET_BLE_HEADER    24
+// BLE payload header: hold_ms(2) + frame_count(2) + palette(32)
+#define PET_BLE_HEADER    36
 
 // ── Lifecycle ──
 bool   pet_buffer_alloc(void);          // malloc(PET_BUF_BYTES), no PSRAM
