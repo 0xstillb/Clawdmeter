@@ -278,6 +278,108 @@ def _openrouter_dialog(ts: object = None) -> None:
         ts=ts,
     )
 
+def _minimax_credentials(config_dir: Path) -> tuple[str, str]:
+    """Return the saved MiniMax API key and Group ID, if available."""
+    cred_file = config_dir / "minimax-credentials.json"
+    try:
+        data = json.loads(cred_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    return str(data.get("api_key", "")), str(data.get("group_id", ""))
+
+
+def _save_minimax_credentials(config_dir: Path, api_key: str, group_id: str) -> None:
+    """Persist the two values required by the MiniMax usage provider."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "minimax-credentials.json").write_text(
+        json.dumps({"api_key": api_key, "group_id": group_id}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _minimax_dialog(ts: object = None) -> None:
+    """Open a dialog for the MiniMax API key and Group ID."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    config_dir = Path.home() / ".config" / "clawdmeter"
+    existing_key, existing_group_id = _minimax_credentials(config_dir)
+
+    win = tk.Tk()
+    win.title("MiniMax — Credentials")
+    win.resizable(False, False)
+    win.configure(bg="#1e1e1e")
+    win.update_idletasks()
+    w, h = 540, 300
+    x = (win.winfo_screenwidth() - w) // 2
+    y = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+    label_font = ("Segoe UI", 10, "bold")
+    entry_font = ("Consolas", 10)
+    btn_font = ("Segoe UI", 10)
+
+    lbl_status = tk.Label(win, text="", bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9))
+    lbl_status.pack(anchor="w", padx=20, pady=(4, 0))
+
+    def _set_status(msg: str, color: str = "#cccccc") -> None:
+        lbl_status.config(text=msg, fg=color)
+        win.update_idletasks()
+
+    def _save() -> None:
+        api_key = entry_key.get().strip()
+        group_id = entry_group_id.get().strip()
+        if not api_key or not group_id:
+            messagebox.showerror("Missing credentials", "MiniMax API Key and Group ID are required.", parent=win)
+            return
+        try:
+            _save_minimax_credentials(config_dir, api_key, group_id)
+        except OSError as exc:
+            messagebox.showerror("Save failed", f"Could not save credentials:\n{exc}", parent=win)
+            return
+
+        from daemon.config import set_provider
+        set_provider("minimax")
+        if ts is not None:
+            ts.request_refresh()
+        _set_status("✓ Saved — provider set to MiniMax.", "#5a7aff")
+        win.after(1200, win.destroy)
+
+    tk.Label(
+        win,
+        text="Enter the two values from your MiniMax developer console.",
+        justify=tk.LEFT, bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=20, pady=(20, 0))
+
+    def _field(label: str, value: str, *, secret: bool = False) -> tk.Entry:
+        frame = tk.Frame(win, bg="#1e1e1e")
+        frame.pack(fill="x", padx=20, pady=(12, 0))
+        tk.Label(frame, text=label, bg="#1e1e1e", fg="#e0e0e0",
+                 font=label_font, width=17, anchor="w").pack(side=tk.LEFT)
+        entry = tk.Entry(frame, font=entry_font, bg="#2d2d2d", fg="#ffffff",
+                         insertbackground="#ffffff", relief=tk.FLAT, bd=6,
+                         show="*" if secret else "")
+        entry.insert(0, value)
+        entry.pack(side=tk.LEFT, fill="x", expand=True)
+        return entry
+
+    entry_key = _field("MiniMax API Key", existing_key, secret=True)
+    entry_group_id = _field("Group ID", existing_group_id)
+
+    button_frame = tk.Frame(win, bg="#1e1e1e")
+    button_frame.pack(fill="x", padx=20, pady=(20, 20))
+    tk.Button(button_frame, text="✓  Save", command=_save,
+              bg="#3a5fd7", fg="white", font=btn_font, relief=tk.FLAT,
+              padx=20, pady=5, cursor="hand2").pack(side=tk.RIGHT, padx=(8, 0))
+    tk.Button(button_frame, text="Cancel", command=win.destroy,
+              bg="#3a3a3a", fg="#cccccc", font=btn_font, relief=tk.FLAT,
+              padx=20, pady=5, cursor="hand2").pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda _: _save())
+    entry_key.focus_set()
+    win.mainloop()
+
+
 def _zen_dialog(ts: object = None) -> None:
     """Open a Tkinter dialog to set OpenCode Zen credentials.
 
@@ -997,6 +1099,10 @@ def main() -> None:
         import threading as _t
         _t.Thread(target=lambda: _openrouter_dialog(ts=ts), daemon=True).start()
 
+    def _on_minimax_settings(_icon_ref, _item) -> None:
+        import threading as _t
+        _t.Thread(target=lambda: _minimax_dialog(ts=ts), daemon=True).start()
+
     def _on_zen_settings(_icon_ref, _item) -> None:
         import threading as _t
         _t.Thread(target=lambda: _zen_dialog(ts=ts), daemon=True).start()
@@ -1018,6 +1124,7 @@ def main() -> None:
         MenuItem("Credentials",
             Menu(
                 MenuItem("DeepSeek API Key...", _on_deepseek_settings),
+                MenuItem("MiniMax Settings...", _on_minimax_settings),
                 MenuItem("OpenRouter API Key...", _on_openrouter_settings),
                 MenuItem("Zen Settings...", _on_zen_settings),
                 MenuItem("OpenCode Go...", _on_opencode_go_settings),

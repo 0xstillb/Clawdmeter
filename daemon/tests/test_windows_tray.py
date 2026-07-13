@@ -20,7 +20,14 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from daemon.tray_windows import TrayState, header_text, _acquire_single_instance, _ERROR_ALREADY_EXISTS
+from daemon.tray_windows import (
+    TrayState,
+    header_text,
+    _acquire_single_instance,
+    _ERROR_ALREADY_EXISTS,
+    _minimax_credentials,
+    _save_minimax_credentials,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +110,16 @@ def test_header_text_connected_never_when_last_sync_none():
     ts.last_sync = None
     result = header_text(ts)
     assert result == "Connected · last update never"
+
+
+def test_minimax_credentials_round_trip(tmp_path):
+    """MiniMax tray settings persist both API key and Group ID for its plugin."""
+    _save_minimax_credentials(tmp_path, "minimax-api-key", "group-123")
+
+    assert _minimax_credentials(tmp_path) == ("minimax-api-key", "group-123")
+    saved = (tmp_path / "minimax-credentials.json").read_text(encoding="utf-8")
+    assert '"api_key": "minimax-api-key"' in saved
+    assert '"group_id": "group-123"' in saved
 
 
 # ---------------------------------------------------------------------------
