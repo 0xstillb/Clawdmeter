@@ -6,6 +6,7 @@ from daemon.payloads import (
     build_codex_usage_payload,
     build_opencode_go_payload,
     build_deepseek_usage_payload,
+    build_minimax_usage_payload,
     build_openrouter_usage_payload,
     build_zen_usage_payload,
 )
@@ -181,3 +182,38 @@ def test_build_opencode_go_payload_supports_dashboard_usage_percent_shape() -> N
     assert payload["sr"] == 274
     assert payload["wr"] == 6340
     assert payload["st"] == "m2"
+
+
+def test_build_minimax_coding_plan_payload_uses_remaining_quota() -> None:
+    """Token Plan percentages/counts are remaining, not used values."""
+    payload = build_minimax_usage_payload(
+        {
+            "data": {
+                "model_remains": [
+                    {
+                        "model_name": "MiniMax-M3",
+                        "current_interval_total_count": 100,
+                        "current_interval_usage_count": 70,
+                        "current_interval_remaining_percent": 70,
+                        "remains_time": 7200,
+                        "current_weekly_total_count": 1000,
+                        "current_weekly_usage_count": 40,
+                        "current_weekly_remaining_percent": 40,
+                        "current_weekly_remains_time": 259200,
+                    },
+                    {
+                        "model_name": "image-01",
+                        "current_interval_remaining_percent": 5,
+                    },
+                ]
+            }
+        },
+        now=0,
+    )
+
+    assert payload["p"] == "minimax"
+    assert payload["top"]["pct"] == 70
+    assert payload["bottom"]["pct"] == 40
+    assert payload["sr"] == 120
+    assert payload["wr"] == 4320
+    assert payload["st"] == "allowed"

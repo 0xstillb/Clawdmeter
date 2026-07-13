@@ -491,49 +491,129 @@ def build_zen_usage_payload(balance_data: dict, *, now: float | None = None,
 
 
 def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict:
-    """Build a BLE payload from MiniMax API usage data.
+    """Build a BLE payload from MiniMax Coding Plan quota data.
 
-    MiniMax returns usage info in the response body under ``usage``:
-      {
-        "usage": {
-          "total_tokens": N,
-          "prompt_tokens": N,
-          "completion_tokens": N,
-          "daily_usage_pct": 45,       # optional — percentage of daily limit used
-          "daily_limit": 1000000,
-          "rate_limit_pct": 12          # optional — current rate-limit utilization
-        }
-      }
-
-    Mapping:
-      - Top card (window_short) → rate-limit utilization (per-minute)
-      - Bottom card (window_long) → daily token usage
+    ``/v1/token_plan/remains`` reports *remaining* quota in ``model_remains``.
+    It is not a chat-completion response and its percentages must not be
+    inverted.  MiniMax's current Coding Plan has a rolling window and a
+    weekly window, which map to the two display cards.
     """
     current_time = time.time() if now is None else now
+    root = data.get("data") if isinstance(data, dict) else None
+    root = root if isinstance(root, dict) else data
+    models = root.get("model_remains") if isinstance(root, dict) else None
+
+    def as_number(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def value(item: dict, *names: str) -> object | None:
+        for name in names:
+            if name in item and item[name] is not None:
+                return item[name]
+        return None
+
+    def remaining_pct(item: dict, window: str) -> int | None:
+        # MiniMax's percentage fields already mean remaining quota.
+        explicit = value(
+            item,
+            f"{window}_remaining_percent",
+            f"{window}RemainingPercent",
+            "usage_percent",
+            "usagePercent",
+        )
+        if explicit is not None:
+            return _int_pct(explicit)
+
+        total = as_number(value(item, f"{window}_total_count", f"{window}TotalCount"))
+        # Despite its historical name, this field is MiniMax's remaining
+        # count; prefer it when an explicit percentage is absent.
+        remaining = as_number(value(item, f"{window}_usage_count", f"{window}UsageCount"))
+        if total is not None and total > 0 and remaining is not None:
+            return _int_pct(remaining / total * 100)
+        return None
+
+    def reset_mins(item: dict, window: str) -> int:
+        seconds = as_number(value(
+            item,
+            f"{window}_remains_time",
+            f"{window}RemainsTime",
+            "remains_time",
+            "remainsTime",
+        ))
+        if seconds is not None and seconds > 0:
+            # Some older responses encode duration in milliseconds.
+            if seconds > 864_000:
+                seconds /= 1000
+            return int(round(seconds / 60))
+
+        end = as_number(value(item, f"{window}_end_time", f"{window}EndTime", "end_time", "endTime"))
+        if end is not None:
+            if end > 10_000_000_000:
+                end /= 1000
+            return max(0, int(round((end - current_time) / 60)))
+        return 0
+
+    if isinstance(models, list):
+        candidates = [item for item in models if isinstance(item, dict)]
+        if candidates:
+            # Prefer text/chat entries over separate image, video, speech, or
+            # music quotas so the monitor follows the Coding Plan people use.
+            def chat_score(item: dict) -> int:
+                name = str(value(item, "model_name", "modelName", "service_type", "serviceType") or "").lower()
+                score = 0
+                if "minimax" in name:
+                    score += 10
+                if any(token in name for token in ("m3", "m2", "text", "chat", "coding")):
+                    score += 100
+                if any(token in name for token in ("image", "video", "speech", "music", "audio")):
+                    score -= 1000
+                return score
+
+            item = max(candidates, key=chat_score)
+            rolling_pct = remaining_pct(item, "current_interval")
+            weekly_pct = remaining_pct(item, "current_weekly")
+            if rolling_pct is not None:
+                # A plan can temporarily omit its weekly quota. Do not turn
+                # that absence into a false 0%; preserve the old fallback only
+                # when no Coding Plan fields are present at all.
+                if weekly_pct is None:
+                    weekly_pct = rolling_pct
+                status = "allowed"
+                if rolling_pct <= 10 or weekly_pct <= 10:
+                    status = "limited"
+                elif rolling_pct <= 25 or weekly_pct <= 25:
+                    status = "warning"
+                return build_windowed_payload(
+                    provider="minimax",
+                    top_pct=rolling_pct,
+                    top_reset_mins=reset_mins(item, "current_interval"),
+                    bottom_pct=weekly_pct,
+                    bottom_reset_mins=reset_mins(item, "current_weekly"),
+                    status=status,
+                    top_has_reset=True,
+                    bottom_has_reset=True,
+                )
+
+    # Compatibility with the original plugin response shape. This path is
+    # retained for old self-hosted gateways, not the official Coding Plan API.
     usage = data.get("usage") or data if isinstance(data, dict) else {}
     if not isinstance(usage, dict):
         usage = {}
-
-    # ── rate-limit remaining (short window) ──────────────────────────
     rate_used = _int_pct(usage.get("rate_limit_pct", 0))
     rate_pct = 100 - rate_used
     reset_after = int(usage.get("rate_limit_reset_seconds", 60))
     rate_reset_mins = int(round(reset_after / 60)) if reset_after > 0 else 1
-
-    # ── daily token remaining (long window) ──────────────────────────
     daily_used = _int_pct(usage.get("daily_usage_pct", 0))
     daily_pct = 100 - daily_used
     daily_limit = _int_pct(usage.get("daily_limit", 0))
-    daily_reset_mins = 1440  # ~24 hours
-
-    # If we only have raw token counts, compute remaining from there
-    had_daily_pct = bool(usage.get("daily_usage_pct"))
-    if not had_daily_pct and daily_limit > 0:
+    daily_reset_mins = 1440
+    if not usage.get("daily_usage_pct") and daily_limit > 0:
         total_tokens = _int_pct(usage.get("total_tokens", 0))
-        used = int(round(total_tokens / max(daily_limit, 1) * 100))
-        daily_pct = 100 - used
+        daily_pct = 100 - int(round(total_tokens / max(daily_limit, 1) * 100))
 
-    # ── status: remaining low → warning/limited ─────────────────────
     status = "allowed"
     if daily_used >= 90 or rate_used >= 90:
         status = "limited"

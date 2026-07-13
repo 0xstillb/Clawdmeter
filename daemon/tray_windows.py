@@ -278,39 +278,39 @@ def _openrouter_dialog(ts: object = None) -> None:
         ts=ts,
     )
 
-def _minimax_credentials(config_dir: Path) -> tuple[str, str]:
-    """Return the saved MiniMax API key and Group ID, if available."""
+def _minimax_credentials(config_dir: Path) -> str:
+    """Return the saved MiniMax Coding Plan API key, if available."""
     cred_file = config_dir / "minimax-credentials.json"
     try:
         data = json.loads(cred_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return "", ""
-    return str(data.get("api_key", "")), str(data.get("group_id", ""))
+        return ""
+    return str(data.get("api_key", ""))
 
 
-def _save_minimax_credentials(config_dir: Path, api_key: str, group_id: str) -> None:
-    """Persist the two values required by the MiniMax usage provider."""
+def _save_minimax_credentials(config_dir: Path, api_key: str) -> None:
+    """Persist a MiniMax Coding Plan key."""
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "minimax-credentials.json").write_text(
-        json.dumps({"api_key": api_key, "group_id": group_id}, indent=2),
+        json.dumps({"api_key": api_key}, indent=2),
         encoding="utf-8",
     )
 
 
 def _minimax_dialog(ts: object = None) -> None:
-    """Open a dialog for the MiniMax API key and Group ID."""
+    """Open a dialog for the MiniMax Coding Plan key."""
     import tkinter as tk
     from tkinter import messagebox
 
     config_dir = Path.home() / ".config" / "clawdmeter"
-    existing_key, existing_group_id = _minimax_credentials(config_dir)
+    existing_key = _minimax_credentials(config_dir)
 
     win = tk.Tk()
     win.title("MiniMax — Credentials")
     win.resizable(False, False)
     win.configure(bg="#1e1e1e")
     win.update_idletasks()
-    w, h = 540, 300
+    w, h = 540, 270
     x = (win.winfo_screenwidth() - w) // 2
     y = (win.winfo_screenheight() - h) // 2
     win.geometry(f"{w}x{h}+{x}+{y}")
@@ -328,12 +328,11 @@ def _minimax_dialog(ts: object = None) -> None:
 
     def _save() -> None:
         api_key = entry_key.get().strip()
-        group_id = entry_group_id.get().strip()
-        if not api_key or not group_id:
-            messagebox.showerror("Missing credentials", "MiniMax API Key and Group ID are required.", parent=win)
+        if not api_key:
+            messagebox.showerror("Missing credentials", "MiniMax Coding Plan API Key is required.", parent=win)
             return
         try:
-            _save_minimax_credentials(config_dir, api_key, group_id)
+            _save_minimax_credentials(config_dir, api_key)
         except OSError as exc:
             messagebox.showerror("Save failed", f"Could not save credentials:\n{exc}", parent=win)
             return
@@ -347,7 +346,7 @@ def _minimax_dialog(ts: object = None) -> None:
 
     tk.Label(
         win,
-        text="Enter the two values from your MiniMax developer console.",
+        text="ใส่ Coding Plan API Key (sk-cp-*) จาก MiniMax เพื่อดูโควต้า Token Plan.",
         justify=tk.LEFT, bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
     ).pack(anchor="w", padx=20, pady=(20, 0))
 
@@ -363,8 +362,7 @@ def _minimax_dialog(ts: object = None) -> None:
         entry.pack(side=tk.LEFT, fill="x", expand=True)
         return entry
 
-    entry_key = _field("MiniMax API Key", existing_key, secret=True)
-    entry_group_id = _field("Group ID", existing_group_id)
+    entry_key = _field("Coding Plan API Key", existing_key, secret=True)
 
     button_frame = tk.Frame(win, bg="#1e1e1e")
     button_frame.pack(fill="x", padx=20, pady=(20, 20))

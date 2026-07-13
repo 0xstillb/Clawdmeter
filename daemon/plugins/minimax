@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""MiniMax provider plugin for Clawdmeter.
+"""MiniMax Coding Plan provider plugin for Clawdmeter.
 
-Polls the MiniMax API for usage data and returns a BLE payload.
-
-MiniMax rate-limit info is returned in the response body under ``usage``
-rather than HTTP headers.  This plugin makes a minimal chat completion call
-to extract that data.
+Polls MiniMax's dedicated Coding Plan quota endpoint.  It deliberately does
+not send a chat-completion request: that endpoint no longer returns plan quota
+and could consume a request just to update the display.
 
 Credentials (checked in order):
-  1. MINIMAX_API_KEY env var
-  2. MINIMAX_GROUP_ID env var (required alongside API key)
-  3. ~/.config/clawdmeter/minimax-credentials.json (keys: api_key, group_id)
+  1. MINIMAX_CODING_API_KEY or MINIMAX_API_KEY env var (``sk-cp-*``)
+  2. ~/.config/clawdmeter/minimax-credentials.json (key: api_key)
+
 
 Dependencies: httpx
 Protocol: DAEMON_PLUGIN_PROTOCOL.md
@@ -37,16 +35,14 @@ from daemon.payloads import build_minimax_usage_payload
 
 # ── constants ───────────────────────────────────────────────────────────────
 
-MINIMAX_CHAT_URL = "https://api.minimax.chat/v1/text/chatcompletion"
+MINIMAX_REMAINS_URLS = (
+    "https://api.minimax.io/v1/token_plan/remains",
+    "https://www.minimax.io/v1/token_plan/remains",
+    "https://api.minimaxi.com/v1/token_plan/remains",
+    "https://www.minimaxi.com/v1/token_plan/remains",
+)
 _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
-
-# A minimal payload to elicit usage info without generating meaningful output.
-_API_BODY = {
-    "model": "minimax-text-01",
-    "tokens_to_generate": 1,
-    "messages": [{"sender_type": "USER", "sender_name": "user", "text": "hi"}],
-}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -59,13 +55,14 @@ def _debug(*args: object) -> None:
 
 
 def _read_credentials() -> dict | None:
-    """Return {api_key, group_id} from env or config file."""
-    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
-    group_id = os.environ.get("MINIMAX_GROUP_ID", "").strip()
-
-    if api_key and group_id:
+    """Return the Coding Plan API key from environment or tray settings."""
+    api_key = (
+        os.environ.get("MINIMAX_CODING_API_KEY", "").strip()
+        or os.environ.get("MINIMAX_API_KEY", "").strip()
+    )
+    if api_key:
         _debug("using env credentials")
-        return {"api_key": api_key, "group_id": group_id}
+        return {"api_key": api_key}
 
     config_paths = [
         Path.home() / ".config" / "clawdmeter" / "minimax-credentials.json",
@@ -76,10 +73,9 @@ def _read_credentials() -> dict | None:
         except (OSError, json.JSONDecodeError):
             continue
         api_key = data.get("api_key", "").strip() or api_key
-        group_id = data.get("group_id", "").strip() or group_id
-        if api_key and group_id:
+        if api_key:
             _debug(f"using credentials from {path}")
-            return {"api_key": api_key, "group_id": group_id}
+            return {"api_key": api_key}
     return None
 
 
@@ -89,6 +85,25 @@ def _is_auth_failure(msg: str | None) -> bool:
         return False
     lowered = msg.lower()
     return "api key" in lowered or "not configured" in lowered or "401" in msg or "403" in msg
+
+
+def _remains_urls() -> tuple[str, ...]:
+    """Return the official Coding Plan quota endpoints to try."""
+    return MINIMAX_REMAINS_URLS
+
+
+def _api_error(body: object) -> str | None:
+    """Extract a safe API error from the two MiniMax response envelopes."""
+    if not isinstance(body, dict):
+        return "unexpected response format"
+    envelope = body.get("data") if isinstance(body.get("data"), dict) else body
+    status = body.get("base_resp") or envelope.get("base_resp")
+    if not isinstance(status, dict):
+        return None
+    code = status.get("status_code")
+    if code in (None, 0, "0"):
+        return None
+    return str(status.get("status_msg") or f"status_code {code}")
 
 
 # ── main poll logic ─────────────────────────────────────────────────────────
@@ -103,17 +118,16 @@ async def poll() -> PluginResponse:
     creds = _read_credentials()
     if creds is None:
         return PluginResponse.failure(
-            "MiniMax: credentials not configured — set MINIMAX_API_KEY and "
-            "MINIMAX_GROUP_ID env vars, or create "
+            "MiniMax: Coding Plan API key not configured — set "
+            "MINIMAX_CODING_API_KEY or MINIMAX_API_KEY, or create "
             "~/.config/clawdmeter/minimax-credentials.json",
             retry=False,
         )
 
     api_key = creds.get("api_key", "")
-    group_id = creds.get("group_id", "")
-    if not api_key or not group_id:
+    if not api_key:
         return PluginResponse.failure(
-            "MiniMax: credentials incomplete (missing api_key or group_id)",
+            "MiniMax: credentials incomplete (missing Coding Plan API key)",
             retry=False,
         )
 
@@ -125,60 +139,68 @@ async def poll() -> PluginResponse:
             retry=False,
         )
 
-    # ── minimal API call ─────────────────────────────────────────────
+    # ── Coding Plan quota API ─────────────────────────────────────────
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
+        "MM-API-Source": "Clawdmeter",
         "User-Agent": _USER_AGENT,
     }
-    url = f"{MINIMAX_CHAT_URL}?GroupId={group_id}"
-
+    last_status: int | None = None
+    saw_auth_failure = False
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
-            resp = await http.post(url, headers=headers, json=_API_BODY)
+            for url in _remains_urls():
+                resp = await http.get(url, headers=headers)
+                last_status = resp.status_code
+
+                if resp.status_code == 200:
+                    try:
+                        body = resp.json()
+                    except json.JSONDecodeError:
+                        _debug(f"{url}: response was not JSON")
+                        continue
+                    error = _api_error(body)
+                    if error:
+                        _debug(f"{url}: API error {error}")
+                        if "key" in error.lower() or "auth" in error.lower():
+                            saw_auth_failure = True
+                            continue
+                        return PluginResponse.failure(f"MiniMax: {error}", retry=True)
+                    if not isinstance(body, dict):
+                        continue
+                    return PluginResponse.success(build_minimax_usage_payload(body, now=time.time()))
+
+                if resp.status_code in (401, 403):
+                    saw_auth_failure = True
+                    _debug(f"{url}: auth failed (HTTP {resp.status_code})")
+                    continue
+                if resp.status_code in (404, 405):
+                    _debug(f"{url}: unavailable (HTTP {resp.status_code})")
+                    continue
+                if resp.status_code == 429:
+                    _debug(f"{url}: rate limited")
+                    return PluginResponse.success(
+                        build_minimax_usage_payload(
+                            {"usage": {"rate_limit_pct": 100, "daily_usage_pct": 0}},
+                            now=time.time(),
+                        )
+                    )
+                _debug(f"{url}: HTTP {resp.status_code}: {resp.text[:200]}")
     except httpx.HTTPError as e:
         _debug(f"HTTP request failed: {e}")
         return PluginResponse.failure(f"MiniMax: Network error: {e}", retry=True)
 
-    # ── HTTP response handling ─────────────────────────────────────────
-    if resp.status_code in (401, 403):
-        _debug(f"auth failed (HTTP {resp.status_code})")
+    if saw_auth_failure:
         return PluginResponse.failure(
-            f"MiniMax: auth failed (HTTP {resp.status_code}) — API key may be invalid",
+            "MiniMax: Coding Plan API key was rejected — use an sk-cp-* key",
             retry=False,
         )
-
-    if resp.status_code == 429:
-        _debug("rate limited (HTTP 429)")
-        payload = build_minimax_usage_payload(
-            {"usage": {"rate_limit_pct": 100, "daily_usage_pct": 0}},
-            now=time.time(),
-        )
-        return PluginResponse.success(payload)
-
-    if resp.status_code >= 400:
-        _debug(f"HTTP {resp.status_code}: {resp.text[:200]}")
-        return PluginResponse.failure(
-            f"MiniMax: HTTP {resp.status_code}", retry=True
-        )
-
-    # ── parse response body ────────────────────────────────────────────
-    try:
-        body = resp.json()
-    except json.JSONDecodeError:
-        _debug("response was not JSON")
-        return PluginResponse.failure(
-            "MiniMax: API returned invalid JSON", retry=True
-        )
-
-    if not isinstance(body, dict):
-        return PluginResponse.failure(
-            "MiniMax: unexpected response format", retry=True
-        )
-
-    # ── build and return payload ───────────────────────────────────────
-    payload = build_minimax_usage_payload(body, now=time.time())
-    return PluginResponse.success(payload)
+    return PluginResponse.failure(
+        f"MiniMax: Coding Plan quota endpoint unavailable (HTTP {last_status or 'network'})",
+        retry=True,
+    )
 
 
 async def main() -> None:

@@ -149,7 +149,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 คลิกขวาที่ไอคอนเพื่อเลือก provider และตั้งค่า credential:
 
 - **Codex / Claude** — อ่าน token ที่ login ไว้ในเครื่องโดยอัตโนมัติ
-- **MiniMax Settings...** — กรอกทั้ง API Key และ Group ID
+- **MiniMax Settings...** — กรอก Coding Plan API Key ที่ขึ้นต้นด้วย `sk-cp-`
 - **DeepSeek API Key...** และ **OpenRouter API Key...** — กรอก API key
 - **Zen Settings...** และ **OpenCode Go...** — ตั้งค่า provider เหล่านั้น
 
@@ -180,7 +180,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 | `Failed to connect` ตอน flash | ใช้สาย USB data, ปิด serial monitor และใช้ BOOT + RST ตามขั้นตอนด้านบน |
 | daemon หาอุปกรณ์ไม่เจอ | ตรวจว่า Pair แล้ว, เปิด Bluetooth, อยู่ในระยะ และลบ pairing เดิมก่อน Pair ใหม่เมื่อเปลี่ยนบอร์ด |
 | ไม่มีข้อมูล usage | ตรวจว่า login provider บนเครื่องนี้แล้ว และดูข้อความ error จากไอคอน tray |
-| MiniMax ไม่อัปเดต | เปิด `Credentials → MiniMax Settings...` แล้วใส่ทั้ง API Key และ Group ID จาก MiniMax developer console |
+| MiniMax ไม่อัปเดต | เปิด `Credentials → MiniMax Settings...` แล้วใส่ Coding Plan API Key (`sk-cp-*`) ใหม่ |
 
 ## โครงสร้างโปรเจกต์
 
