@@ -562,15 +562,16 @@ def _payload_for_wire(payload: dict) -> dict:
     if not all(key in payload for key in alias_keys):
         return payload
 
-    # Keep full payload for prepaid and single-window Codex. The flat form
-    # loses panel kind/subtext and, for Codex, the weekly_only marker used by
-    # firmware to avoid displaying a fictitious second limit. Keep the normal
-    # two-window Codex payload compact for WinRT's smaller write budget.
+    # Keep full payload for prepaid, single-window Codex, and Go's custom
+    # weekly/monthly layout. The flat form loses panel labels/kind/subtext.
+    # Keep the normal two-window Codex payload compact for WinRT's smaller
+    # write budget.
     plan_type = payload.get("plan_type")
     provider = payload.get("p")
     if (
         (isinstance(plan_type, str) and plan_type and plan_type != "subscription")
         or (provider == "codex" and payload.get("mode") == "weekly_only")
+        or (provider == "go" and payload.get("mode") == "weekly_monthly")
     ):
         return payload
 

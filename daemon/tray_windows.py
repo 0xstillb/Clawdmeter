@@ -138,7 +138,8 @@ def tray_title_text(ts: TrayState, max_len: int = 128) -> str:
 # ── Generic API key dialog ───────────────────────────────────────────────
 
 def _apikey_dialog(*, title: str, provider_id: str, cred_filename: str,
-                    label: str, help_text: str, ts: object = None) -> None:
+                    label: str, help_text: str, ts: object = None,
+                    secret: bool = True) -> None:
     """Open a Tkinter dialog to set a simple API key credential.
 
     Args:
@@ -189,7 +190,7 @@ def _apikey_dialog(*, title: str, provider_id: str, cred_filename: str,
         if not key:
             messagebox.showerror("Error", "API Key is required", parent=win)
             return
-        _set_status("Testing…", "#5a7aff")
+        _set_status("Saving…", "#5a7aff")
 
         try:
             config_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +227,8 @@ def _apikey_dialog(*, title: str, provider_id: str, cred_filename: str,
                    font=label_font, width=16, anchor="w")
     lbl.pack(side=tk.LEFT)
     entry_key = tk.Entry(frm_key, font=entry_font, bg="#2d2d2d", fg="#ffffff",
-                         insertbackground="#ffffff", relief=tk.FLAT, bd=6)
+                         insertbackground="#ffffff", relief=tk.FLAT, bd=6,
+                         show="*" if secret else "")
     entry_key.insert(0, existing_key)
     entry_key.pack(side=tk.LEFT, fill="x", expand=True)
 
@@ -264,7 +266,7 @@ def _deepseek_dialog(ts: object = None) -> None:
         provider_id="deepseek",
         cred_filename="deepseek-credentials.json",
         label="DeepSeek API Key",
-        help_text="Get this from platform.deepseek.com → API Keys",
+        help_text="API-only: key from platform.deepseek.com/api_keys. The display shows total balance plus paid/granted credit.",
         ts=ts,
     )
 

@@ -25,11 +25,13 @@ def test_build_opencode_go_payload_uses_remaining_percent() -> None:
     )
 
     assert payload["p"] == "go"
-    assert payload["s"] == 100
-    assert payload["w"] == 75
-    assert payload["top"]["pct"] == 100
-    assert payload["bottom"]["pct"] == 75
-    assert payload["st"] == "m50"
+    assert payload["s"] == 75
+    assert payload["w"] == 50
+    assert payload["top"]["label"] == "Weekly"
+    assert payload["bottom"]["label"] == "Monthly"
+    assert payload["top"]["pct"] == 75
+    assert payload["bottom"]["pct"] == 50
+    assert payload["st"] == "allowed"
 
 
 def test_build_codex_usage_payload_maps_single_window_to_weekly() -> None:
@@ -61,15 +63,14 @@ def test_build_codex_usage_payload_maps_single_window_to_weekly() -> None:
 def test_build_opencode_go_payload_preserves_missing_reset_subtext() -> None:
     payload = build_opencode_go_payload(
         {
-            "rolling": {"used": 10.0, "limit": 100.0},
             "weekly": {"used": 20.0, "limit": 100.0},
-            "monthly": {"used": 0.0, "limit": 100.0},
+            "monthly": {"used": 30.0, "limit": 100.0},
         },
         now=0,
     )
 
-    assert payload["top"]["pct"] == 90
-    assert payload["bottom"]["pct"] == 80
+    assert payload["top"]["pct"] == 80
+    assert payload["bottom"]["pct"] == 70
     assert payload["top"]["has_reset"] is False
     assert payload["bottom"]["has_reset"] is False
     assert payload["top"]["subtext"] == "reset unavailable"
@@ -86,20 +87,23 @@ def test_build_deepseek_prepaid_payload() -> None:
             "currency": "CNY",
             "total_balance": "75.00",
             "topped_up_balance": "70.00",
-        }]
+        }, {
+            "currency": "USD",
+            "total_balance": "50.00",
+            "granted_balance": "10.00",
+            "topped_up_balance": "40.00",
+        }],
     }
-    p = build_deepseek_usage_payload(
-        balance, now=now, total_top_up=100.0,
-        daily_spent=5.00, daily_spent_pct=5, daily_reset_mins=360,
-    )
+    p = build_deepseek_usage_payload(balance, now=now)
     assert p["p"] == "deepseek"
     assert p["plan_type"] == "prepaid"
     assert p["top"]["kind"] == "budget_daily"
-    assert p["top"]["pct"] == 5
+    assert p["top"]["label"] == "Paid + Grant"
+    assert p["top"]["subtext"] == "USD 40.00 + G 10.00"
     assert p["bottom"]["kind"] == "wallet_depletion"
-    assert p["bottom"]["pct"] == 70  # (100-30)/100*100 = 70% remaining
-    assert p["bottom"]["label"] == "CNY"
-    assert p["bottom"]["subtext"] == "75.00"
+    assert p["bottom"]["pct"] == 50
+    assert p["bottom"]["label"] == "Balance"
+    assert p["bottom"]["subtext"] == "USD 50.00"
     assert p["st"] == "allowed"
 
 
@@ -150,17 +154,20 @@ def test_prepaid_status_thresholds() -> None:
         "is_available": True,
         "balance_infos": [{"currency": "CNY", "total_balance": "5.00", "topped_up_balance": "5.00"}]
     }
-    # 5% remaining → limited
-    p = build_deepseek_usage_payload(balance, now=now, total_top_up=100.0,
-                                      daily_spent=0, daily_spent_pct=0, daily_reset_mins=1440)
+    # A zero balance prompts the user to add credits.
+    balance["balance_infos"][0]["total_balance"] = "0.00"
+    balance["balance_infos"][0]["topped_up_balance"] = "0.00"
+    p = build_deepseek_usage_payload(balance, now=now)
     assert p["st"] == "limited"
+    assert p["bottom"]["subtext"] == "Add credits"
 
-    # 20% remaining → warning
+    # A positive balance marked unavailable stays visible with its status.
     balance["balance_infos"][0]["total_balance"] = "20.00"
     balance["balance_infos"][0]["topped_up_balance"] = "20.00"
-    p = build_deepseek_usage_payload(balance, now=now, total_top_up=100.0,
-                                      daily_spent=0, daily_spent_pct=0, daily_reset_mins=1440)
-    assert p["st"] == "warning"
+    balance["is_available"] = False
+    p = build_deepseek_usage_payload(balance, now=now)
+    assert p["st"] == "limited"
+    assert p["bottom"]["subtext"] == "CNY 20.00 (API unavailable)"
 
 
 def test_build_opencode_go_payload_supports_dashboard_usage_percent_shape() -> None:
@@ -173,15 +180,15 @@ def test_build_opencode_go_payload_supports_dashboard_usage_percent_shape() -> N
         now=0,
     )
 
-    assert payload["s"] == 92
-    assert payload["w"] == 96
-    assert payload["top"]["pct"] == 92
-    assert payload["bottom"]["pct"] == 96
+    assert payload["s"] == 96
+    assert payload["w"] == 98
+    assert payload["top"]["pct"] == 96
+    assert payload["bottom"]["pct"] == 98
     assert payload["top"]["has_reset"] is True
     assert payload["bottom"]["has_reset"] is True
-    assert payload["sr"] == 274
-    assert payload["wr"] == 6340
-    assert payload["st"] == "m2"
+    assert payload["sr"] == 6340
+    assert payload["wr"] == 42571
+    assert payload["st"] == "allowed"
 
 
 def test_build_minimax_coding_plan_payload_uses_remaining_quota() -> None:
@@ -197,7 +204,7 @@ def test_build_minimax_coding_plan_payload_uses_remaining_quota() -> None:
                         "current_interval_remaining_percent": 70,
                         "remains_time": 7200,
                         "current_weekly_total_count": 1000,
-                        "current_weekly_usage_count": 40,
+                        "current_weekly_usage_count": 400,
                         "current_weekly_remaining_percent": 40,
                         "current_weekly_remains_time": 259200,
                     },
@@ -217,3 +224,28 @@ def test_build_minimax_coding_plan_payload_uses_remaining_quota() -> None:
     assert payload["sr"] == 120
     assert payload["wr"] == 4320
     assert payload["st"] == "allowed"
+
+
+def test_minimax_count_fields_override_rounded_remaining_percent() -> None:
+    """Counts are the source of truth when dashboard and API differ by rounding."""
+    payload = build_minimax_usage_payload(
+        {
+            "data": {
+                "model_remains": [{
+                    "model_name": "MiniMax-M3",
+                    "current_interval_total_count": 1000,
+                    "current_interval_usage_count": 731,
+                    "current_interval_remaining_percent": 70,
+                    "current_weekly_total_count": 1000,
+                    "current_weekly_usage_count": 541,
+                    "current_weekly_remaining_percent": 50,
+                    "weekly_remains_time": 604800000,
+                }]
+            }
+        },
+        now=0,
+    )
+
+    assert payload["top"]["pct"] == 73
+    assert payload["bottom"]["pct"] == 54
+    assert payload["bottom"]["reset_mins"] == 10080

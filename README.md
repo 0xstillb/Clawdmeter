@@ -150,7 +150,8 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 
 - **Codex / Claude** — อ่าน token ที่ login ไว้ในเครื่องโดยอัตโนมัติ
 - **MiniMax Settings...** — กรอก Coding Plan API Key ที่ขึ้นต้นด้วย `sk-cp-`
-- **DeepSeek API Key...** และ **OpenRouter API Key...** — กรอก API key
+- **DeepSeek API Key...** — กรอก API key เพื่อดูยอดคงเหลือ พร้อม breakdown ของ paid / granted credit
+- **OpenRouter API Key...** — กรอก API key
 - **Zen Settings...** และ **OpenCode Go...** — ตั้งค่า provider เหล่านั้น
 
 หลังแก้ credential ให้เลือก **Restart** จาก tray (หรือ Quit แล้วเปิด

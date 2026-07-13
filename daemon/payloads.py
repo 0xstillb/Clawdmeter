@@ -137,11 +137,8 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     ``{usagePercent, resetInSec, status}`` shape emitted by the web dashboard.
 
     The firmware's two-card display maps:
-      - **Top card** (``window_short``) → rolling 5-hour usage
-      - **Bottom card** (``window_long``) → weekly usage
-
-    Monthly usage is carried in the status string so a future firmware rev
-    can surface it without a protocol break.
+      - **Top card** → weekly remaining quota
+      - **Bottom card** → monthly remaining quota
     """
     current_time = time.time() if now is None else now
 
@@ -152,13 +149,6 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
         used = u.get("used", 0) or 0
         used_pct = max(0, min(100, int(round(used / lim * 100))))
         return 100 - used_pct
-
-    def _used_window_pct(u: dict) -> int:
-        if "usagePercent" in u:
-            return _int_pct(u.get("usagePercent"))
-        lim = u.get("limit", 0) or 1
-        used = u.get("used", 0) or 0
-        return max(0, min(100, int(round(used / lim * 100))))
 
     def _reset_mins(u: dict) -> int:
         if "resetInSec" in u:
@@ -176,53 +166,65 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
             return 0
         return int(round(secs / 60)) if secs > 0 else 0
 
-    rolling_pct = _remaining_window_pct(parsed.get("rolling", {}))
-    rolling_reset = _reset_mins(parsed.get("rolling", {}))
-    rolling_window = parsed.get("rolling", {})
     weekly_window = parsed.get("weekly", {})
     monthly_window = parsed.get("monthly", {})
-
-    rolling_has_reset = (
-        rolling_window.get("periodEnd") is not None or
-        rolling_window.get("resetInSec") is not None
-    )
     weekly_pct = _remaining_window_pct(parsed.get("weekly", {}))
     weekly_reset = _reset_mins(parsed.get("weekly", {}))
     weekly_has_reset = (
         weekly_window.get("periodEnd") is not None or
         weekly_window.get("resetInSec") is not None
     )
-    monthly_pct = _used_window_pct(monthly_window)
+    monthly_pct = _remaining_window_pct(monthly_window)
+    monthly_reset = _reset_mins(monthly_window)
+    monthly_has_reset = (
+        monthly_window.get("periodEnd") is not None or
+        monthly_window.get("resetInSec") is not None
+    )
 
-    status = f"m{monthly_pct}" if monthly_pct else "allowed"
+    status = "allowed"
+    if weekly_pct <= 10 or monthly_pct <= 10:
+        status = "limited"
+    elif weekly_pct <= 25 or monthly_pct <= 25:
+        status = "warning"
 
-    return build_windowed_payload(
+    # Labels intentionally differ from build_windowed_payload's standard
+    # Current/Weekly wording: Go's useful long-lived limits are Weekly and
+    # Monthly, not the rolling request window.
+    return build_provider_payload(
         provider="go",
-        top_pct=rolling_pct,
-        top_reset_mins=rolling_reset,
-        bottom_pct=weekly_pct,
-        bottom_reset_mins=weekly_reset,
+        mode="weekly_monthly",
+        top={
+            "label": "Weekly",
+            "kind": "window_long",
+            "pct": weekly_pct,
+            "reset_mins": weekly_reset,
+            "has_reset": weekly_has_reset,
+            **({"subtext": "reset unavailable"} if not weekly_has_reset else {}),
+        },
+        bottom={
+            "label": "Monthly",
+            "kind": "window_long",
+            "pct": monthly_pct,
+            "reset_mins": monthly_reset,
+            "has_reset": monthly_has_reset,
+            **({"subtext": "reset unavailable"} if not monthly_has_reset else {}),
+        },
         status=status,
-        top_has_reset=rolling_has_reset,
-        bottom_has_reset=weekly_has_reset,
-        top_subtext=None if rolling_has_reset else "reset unavailable",
-        bottom_subtext=None if weekly_has_reset else "reset unavailable",
+        legacy_aliases={
+            "s": weekly_pct,
+            "sr": weekly_reset,
+            "w": monthly_pct,
+            "wr": monthly_reset,
+        },
     )
 
 
-def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None,
-                                  total_top_up: float = 0,
-                                  daily_spent: float = 0,
-                                  daily_spent_pct: int = 0,
-                                  daily_reset_mins: int = 1440) -> dict:
-    """Build a BLE payload from DeepSeek balance API data (prepaid model).
+def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None) -> dict:
+    """Build a BLE payload from DeepSeek's API-only balance response.
 
-    DeepSeek is a prepaid (เติมเงิน) provider — usage is based on
-    remaining balance vs total amount topped up.
-
-    UI Layout:
-      - **Top card** (``budget_daily``) → daily spend in $ + % of day budget
-      - **Bottom card** (``wallet_depletion``) → total balance remaining in $
+    DeepSeek exposes no daily, session, or weekly quota windows. Its balance
+    endpoint reports total, paid (topped-up), and granted credit, so the two
+    cards show that exact breakdown instead of derived daily spend.
 
     ``balance_data`` shape from ``GET /user/balance``::
 
@@ -236,67 +238,60 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
             }]
         }
 
-    ``total_top_up`` is the user's configured total top-up amount (optional).
-    Used for computing remaining/consumed percentages.
-
-    ``daily_spent`` / ``daily_spent_pct`` come from the plugin's state tracking.
     """
     infos = balance_data.get("balance_infos", [])
-    if not isinstance(infos, list) or not infos:
+    entries = [item for item in infos if isinstance(item, dict)] if isinstance(infos, list) else []
+    if not entries:
         return _build_deepseek_fallback_payload(now)
 
-    info = infos[0] if isinstance(infos[0], dict) else {}
+    # A DeepSeek account may contain multiple ledgers. Prefer USD when present.
+    info = next((item for item in entries if str(item.get("currency", "")).upper() == "USD"), entries[0])
     is_available = bool(balance_data.get("is_available", True))
-    currency = info.get("currency", "CNY")
-    total_balance = float(info.get("total_balance", 0) or 0)
-    topped_up_balance = float(info.get("topped_up_balance", 0) or 0)
+    currency = str(info.get("currency", "CNY")).upper()
 
-    # ── Remaining % (for bar & bottom card) ───────────────────────────
-    remaining_pct = 100
-    if total_top_up > 0 and topped_up_balance > 0:
-        consumed = max(0, total_top_up - topped_up_balance)
-        used_pct = max(0, min(100, int(round(consumed / total_top_up * 100))))
-        remaining_pct = 100 - used_pct
-    elif total_balance > 0:
-        remaining_pct = min(100, int(total_balance))
+    def amount(key: str) -> float:
+        try:
+            return max(0.0, float(info.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0.0
 
-    # ── Status ────────────────────────────────────────────────────────
-    status = "allowed" if is_available else "limited"
-    if remaining_pct <= 10:
-        status = "limited"
-    elif remaining_pct <= 25:
-        status = "warning"
+    total_balance = amount("total_balance")
+    paid_balance = amount("topped_up_balance")
+    granted_balance = amount("granted_balance")
+    if granted_balance == 0 and total_balance > paid_balance:
+        granted_balance = total_balance - paid_balance
+
+    paid_detail = f"{currency} {paid_balance:.2f} + G {granted_balance:.2f}"
+    if total_balance <= 0:
+        balance_detail = "Add credits"
+    elif not is_available:
+        balance_detail = f"{currency} {total_balance:.2f} (API unavailable)"
+    else:
+        balance_detail = f"{currency} {total_balance:.2f}"
 
     return build_provider_payload(
         provider="deepseek",
         mode="prepaid",
         plan_type="prepaid",
-        # Top card: daily spend ($ amount + % of day budget)
         top={
-            "label": "Today",
+            "label": "Paid + Grant",
             "kind": "budget_daily",
-            "pct": daily_spent_pct,
-            "reset_mins": daily_reset_mins,
-            "has_reset": daily_reset_mins > 0,
-            "subtext": f"{daily_spent:.2f} {currency} spent" if daily_spent > 0 else "no spend",
-        },
-        # Bottom card: total balance remaining ($ amount)
-        bottom={
-            "label": currency,
-            "kind": "wallet_depletion",
-            "pct": remaining_pct,
+            "pct": paid_balance + granted_balance,
             "reset_mins": 0,
             "has_reset": False,
-            "subtext": f"{total_balance:.2f}",
+            "subtext": paid_detail,
         },
-        status=status,
+        bottom={
+            "label": "Balance",
+            "kind": "wallet_depletion",
+            "pct": total_balance,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": balance_detail,
+        },
+        status="allowed" if is_available and total_balance > 0 else "limited",
         ok=is_available,
-        legacy_aliases={
-            "s": remaining_pct,
-            "sr": 0,
-            "w": daily_spent_pct,
-            "wr": daily_reset_mins,
-        },
+        legacy_aliases={"s": total_balance, "sr": 0, "w": paid_balance + granted_balance, "wr": 0},
     )
 
 
@@ -307,11 +302,11 @@ def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
         mode="prepaid",
         plan_type="prepaid",
         top={
-            "label": "Today",
+            "label": "Paid + Grant",
             "kind": "budget_daily",
             "pct": 0,
-            "reset_mins": 1440,
-            "has_reset": True,
+            "reset_mins": 0,
+            "has_reset": False,
             "subtext": "unavailable",
         },
         bottom={
@@ -324,7 +319,7 @@ def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
         },
         status="unknown",
         ok=False,
-        legacy_aliases={"s": 0, "sr": 0, "w": 0, "wr": 1440},
+        legacy_aliases={"s": 0, "sr": 0, "w": 0, "wr": 0},
     )
 
 
@@ -516,6 +511,15 @@ def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict
         return None
 
     def remaining_pct(item: dict, window: str) -> int | None:
+        total = as_number(value(item, f"{window}_total_count", f"{window}TotalCount"))
+        # Despite its historical name, this field is MiniMax's remaining
+        # count. Prefer the count-derived result; it is more exact than the
+        # rounded percentage shown in newer API responses and matches the
+        # Token Plan web dashboard.
+        remaining = as_number(value(item, f"{window}_usage_count", f"{window}UsageCount"))
+        if total is not None and total > 0 and remaining is not None:
+            return _int_pct(remaining / total * 100)
+
         # MiniMax's percentage fields already mean remaining quota.
         explicit = value(
             item,
@@ -526,30 +530,42 @@ def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict
         )
         if explicit is not None:
             return _int_pct(explicit)
-
-        total = as_number(value(item, f"{window}_total_count", f"{window}TotalCount"))
-        # Despite its historical name, this field is MiniMax's remaining
-        # count; prefer it when an explicit percentage is absent.
-        remaining = as_number(value(item, f"{window}_usage_count", f"{window}UsageCount"))
-        if total is not None and total > 0 and remaining is not None:
-            return _int_pct(remaining / total * 100)
         return None
 
     def reset_mins(item: dict, window: str) -> int:
-        seconds = as_number(value(
-            item,
-            f"{window}_remains_time",
-            f"{window}RemainsTime",
-            "remains_time",
-            "remainsTime",
-        ))
+        if window == "current_weekly":
+            # Do not fall back to the interval reset here: it is commonly a
+            # five-hour timestamp and would be displayed incorrectly on the
+            # weekly card when the API omits its weekly reset.
+            seconds = as_number(value(
+                item,
+                "current_weekly_remains_time",
+                "currentWeeklyRemainsTime",
+                "weekly_remains_time",
+                "weeklyRemainsTime",
+            ))
+            end = as_number(value(
+                item,
+                "current_weekly_end_time",
+                "currentWeeklyEndTime",
+                "weekly_end_time",
+                "weeklyEndTime",
+            ))
+        else:
+            seconds = as_number(value(
+                item,
+                f"{window}_remains_time",
+                f"{window}RemainsTime",
+                "remains_time",
+                "remainsTime",
+            ))
+            end = as_number(value(item, f"{window}_end_time", f"{window}EndTime", "end_time", "endTime"))
         if seconds is not None and seconds > 0:
             # Some older responses encode duration in milliseconds.
             if seconds > 864_000:
                 seconds /= 1000
             return int(round(seconds / 60))
 
-        end = as_number(value(item, f"{window}_end_time", f"{window}EndTime", "end_time", "endTime"))
         if end is not None:
             if end > 10_000_000_000:
                 end /= 1000
@@ -564,12 +580,20 @@ def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict
             def chat_score(item: dict) -> int:
                 name = str(value(item, "model_name", "modelName", "service_type", "serviceType") or "").lower()
                 score = 0
-                if "minimax" in name:
+                if name.startswith("minimax-m"):
+                    score += 1_000
+                elif "minimax" in name:
                     score += 10
                 if any(token in name for token in ("m3", "m2", "text", "chat", "coding")):
                     score += 100
                 if any(token in name for token in ("image", "video", "speech", "music", "audio")):
                     score -= 1000
+                interval_total = as_number(value(item, "current_interval_total_count", "currentIntervalTotalCount"))
+                weekly_total = as_number(value(item, "current_weekly_total_count", "currentWeeklyTotalCount"))
+                if interval_total is not None and interval_total > 0:
+                    score += 10_000
+                if weekly_total is not None and weekly_total > 0:
+                    score += 1_000
                 return score
 
             item = max(candidates, key=chat_score)

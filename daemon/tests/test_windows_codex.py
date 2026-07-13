@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.config import config_path, provider_preference, set_provider
+from daemon.payloads import build_opencode_go_payload
 from daemon.claude_usage_daemon_windows import (
     _account_id_from_id_token,
     _provider_failure_payload,
@@ -135,6 +136,18 @@ def test_codex_weekly_only_payload_is_not_flattened_for_wire():
     assert wire["p"] == "codex"
     assert wire["mode"] == "weekly_only"
     assert wire["top"]["label"] == "Weekly"
+
+
+def test_go_weekly_monthly_payload_is_not_flattened_for_wire():
+    payload = build_opencode_go_payload({
+        "weekly": {"used": 25, "limit": 100, "periodEnd": 7200},
+        "monthly": {"used": 10, "limit": 100, "periodEnd": 14400},
+    }, now=0)
+
+    wire = _payload_for_wire(payload)
+
+    assert wire["top"]["label"] == "Weekly"
+    assert wire["bottom"]["label"] == "Monthly"
 
 
 def test_select_usage_source_prefers_codex(monkeypatch):

@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """DeepSeek provider plugin for Clawdmeter.
 
-DeepSeek is a **prepaid** (เติมเงิน) provider — usage is tracked via
-remaining balance, not rate-limit headers.
+DeepSeek is an API-only prepaid provider. It reports total balance plus paid
+and granted credit; it does not expose time-window quota data.
 
-Fetches ``GET /user/balance`` and tracks daily spend via a local state file.
+Fetches ``GET /user/balance`` directly.
 
 UI Layout:
-  - Top card: Daily spend ($ amount + % of day's budget used)
-  - Bottom card: Total balance remaining ($ amount)
+  - Top card: Paid and granted credit breakdown
+  - Bottom card: Total balance remaining
 
 Credentials (checked in order):
-  1. DEEPSEEK_API_KEY env var
-  2. ~/.config/clawdmeter/deepseek-credentials.json (keys: api_key, total_top_up)
-
-``total_top_up`` is optional. If set, the plugin computes
-consumed/remaining percentages from the top-up amount.
+  1. DEEPSEEK_API_KEY or DEEPSEEK_KEY env var
+  2. ~/.config/clawdmeter/deepseek-credentials.json (key: api_key)
 
 Dependencies: httpx
 Protocol: DAEMON_PLUGIN_PROTOCOL.md
@@ -27,8 +24,6 @@ import asyncio
 import json
 import os
 import sys
-import time
-from datetime import date
 from pathlib import Path
 
 # Add repo root so imports work when run standalone
@@ -47,7 +42,6 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
 _STATE_DIR = Path.home() / ".config" / "clawdmeter"
-_STATE_FILE = _STATE_DIR / "deepseek-state.json"
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -60,19 +54,12 @@ def _debug(*args: object) -> None:
 
 
 def _read_credentials() -> dict | None:
-    """Return {api_key, total_top_up} from env or config file."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    total_top_up_str = os.environ.get("DEEPSEEK_TOTAL_TOP_UP", "").strip()
+    """Return the API key from environment or tray settings."""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_KEY", "").strip()
 
     if api_key:
-        total_top_up = 0.0
-        if total_top_up_str:
-            try:
-                total_top_up = float(total_top_up_str)
-            except ValueError:
-                pass
         _debug("using env credentials")
-        return {"api_key": api_key, "total_top_up": total_top_up}
+        return {"api_key": api_key}
 
     config_paths = [
         _STATE_DIR / "deepseek-credentials.json",
@@ -85,15 +72,8 @@ def _read_credentials() -> dict | None:
         api_key = data.get("api_key", "").strip()
         if not api_key:
             continue
-        total_top_up = 0.0
-        raw = data.get("total_top_up")
-        if raw:
-            try:
-                total_top_up = float(raw)
-            except (TypeError, ValueError):
-                pass
         _debug(f"using credentials from {path}")
-        return {"api_key": api_key, "total_top_up": total_top_up}
+        return {"api_key": api_key}
     return None
 
 
@@ -103,74 +83,6 @@ def _is_auth_failure(msg: str | None) -> bool:
         return False
     lowered = msg.lower()
     return "api key" in lowered or "not configured" in lowered or "401" in msg or "403" in msg
-
-
-# ── daily spend tracking (state file) ───────────────────────────────────────
-
-
-def _read_state() -> dict | None:
-    """Read state file, return dict or None."""
-    try:
-        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _write_state(state: dict) -> None:
-    """Write state dict to file."""
-    _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
-
-
-def _compute_daily_spend(current_balance: float, currency: str) -> dict:
-    """Compute daily spend and reset start-of-day if new day.
-
-    Returns dict with keys: daily_spent, daily_spent_pct, start_balance, reset_mins.
-    """
-    today = str(date.today())
-    state = _read_state()
-
-    # New day or no state → reset
-    if state is None or state.get("date") != today:
-        _debug(f"resetting daily tracking for {today}")
-        state = {
-            "date": today,
-            "start_balance": current_balance,
-            "currency": currency,
-        }
-        _write_state(state)
-        return {
-            "daily_spent": 0.0,
-            "daily_spent_pct": 0,
-            "start_balance": current_balance,
-            "reset_mins": _minutes_until_midnight(),
-        }
-
-    # Same day → compute spend
-    start_balance = float(state.get("start_balance", current_balance))
-    daily_spent = max(0.0, start_balance - current_balance)
-    daily_spent_pct = 0
-    if start_balance > 0:
-        daily_spent_pct = min(100, int(round(daily_spent / start_balance * 100)))
-
-    # Persist latest balance for comparison
-    state["last_balance"] = current_balance
-    _write_state(state)
-
-    return {
-        "daily_spent": daily_spent,
-        "daily_spent_pct": daily_spent_pct,
-        "start_balance": start_balance,
-        "reset_mins": _minutes_until_midnight(),
-    }
-
-
-def _minutes_until_midnight() -> int:
-    """Minutes from now until 00:00 tomorrow (local time)."""
-    import datetime as dt
-    now = dt.datetime.now()  # local time
-    tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
-    return int((tomorrow - now).total_seconds() / 60)
 
 
 # ── main poll logic ─────────────────────────────────────────────────────────
@@ -191,7 +103,6 @@ async def poll() -> PluginResponse:
         )
 
     api_key = creds.get("api_key", "")
-    total_top_up = creds.get("total_top_up", 0.0)
     if not api_key:
         return PluginResponse.failure(
             "DeepSeek: API key is empty", retry=False
@@ -247,30 +158,16 @@ async def poll() -> PluginResponse:
             "DeepSeek: unexpected response format", retry=True
         )
 
-    # ── get current balance from response ──────────────────────────────
+    # ── validate balance response ─────────────────────────────────────
     infos = body.get("balance_infos", [])
-    if not isinstance(infos, list) or not infos or not isinstance(infos[0], dict):
+    if not isinstance(infos, list) or not any(isinstance(item, dict) for item in infos):
         _debug("no balance_infos in response")
         return PluginResponse.failure(
             "DeepSeek: unexpected balance response format", retry=True
         )
 
-    info = infos[0]
-    currency = info.get("currency", "CNY")
-    total_balance = float(info.get("total_balance", 0) or 0)
-
-    # ── compute daily spend ────────────────────────────────────────────
-    daily = _compute_daily_spend(total_balance, currency)
-
     # ── build and return payload ───────────────────────────────────────
-    payload = build_deepseek_usage_payload(
-        body,
-        now=time.time(),
-        total_top_up=total_top_up,
-        daily_spent=daily["daily_spent"],
-        daily_spent_pct=daily["daily_spent_pct"],
-        daily_reset_mins=daily["reset_mins"],
-    )
+    payload = build_deepseek_usage_payload(body)
     return PluginResponse.success(payload)
 
 
