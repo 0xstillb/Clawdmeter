@@ -3,17 +3,17 @@
 
 OpenCode Zen is a **prepaid balance** provider ($20 increments).
 
-Fetches balance from the proposed ``GET /zen/v1/balance`` API.  Falls
-back to dashboard scraping when the API endpoint returns a 404.
+Fetches balance from the billing page (same workspace as Go).
+Uses the auth cookie from Go credentials for authentication.
 
 UI Layout:
-  - Top card: Daily spend ($ amount + % of day's balance used)
-  - Bottom card: Remaining balance ($ amount)
+  - Top card: Daily spend ($ amount spent today)
+  - Bottom card: Remaining balance ($ amount + bar scaled to configured budget)
 
 Credentials:
-  1. ZEN_API_KEY env var
-  2. ZEN_WORKSPACE_ID env var (for dashboard scraping fallback)
-  3. ~/.config/clawdmeter/zen-credentials.json (keys: api_key, workspace_id)
+  Zen borrows workspace_id + auth_cookie from Go credentials
+  (opencode-go-credentials.json or OPENCODE_GO env vars).
+  Total Budget is set via zen-credentials.json (total_budget field).
 
 Daily spend is tracked via a local state file at
 ~/.config/clawdmeter/zen-state.json.
@@ -45,13 +45,11 @@ from daemon.payloads import build_zen_usage_payload
 
 # ── constants ───────────────────────────────────────────────────────────────
 
-ZEN_BALANCE_API = "https://opencode.ai/zen/v1/balance"
-ZEN_DASHBOARD_URL = "https://opencode.ai/workspace/{workspace_id}/zen"
+ZEN_DASHBOARD_URL = "https://opencode.ai/workspace/{workspace_id}/billing/"
 _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
 _STATE_DIR = Path.home() / ".config" / "clawdmeter"
 _STATE_FILE = _STATE_DIR / "zen-state.json"
-
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -62,33 +60,53 @@ def _debug(*args: object) -> None:
 
 
 def _read_credentials() -> dict | None:
-    api_key = os.environ.get("ZEN_API_KEY", "").strip()
-    workspace_id = os.environ.get("ZEN_WORKSPACE_ID", "").strip()
+    """Return {workspace_id, auth_cookie, total_budget?} from Go credentials.
 
-    if api_key:
-        _debug("using env ZEN_API_KEY")
-        return {"api_key": api_key, "workspace_id": workspace_id}
+    Priority:
+      1. OPENCODE_GO env vars
+      2. ~/.config/clawdmeter/opencode-go-credentials.json
+      3. ~/.config/opencode/opencode-go-usage.json
+    Also reads total_budget from ~/.config/clawdmeter/zen-credentials.json.
+    """
+    # ── total_budget (from Zen-specific config) ──────────────────────────
+    total_budget = None
+    zen_cred_file = _STATE_DIR / "zen-credentials.json"
+    try:
+        zdata = json.loads(zen_cred_file.read_text(encoding="utf-8"))
+        tb = zdata.get("total_budget")
+        if tb is not None:
+            total_budget = float(tb)
+    except (OSError, json.JSONDecodeError):
+        pass
 
-    config_paths = [_STATE_DIR / "zen-credentials.json"]
-    for path in config_paths:
+    # ── workspace_id + auth_cookie (from Go credentials) ────────────────
+    wid = os.environ.get("OPENCODE_GO_WORKSPACE_ID", "").strip()
+    cookie = os.environ.get("OPENCODE_GO_AUTH_COOKIE", "").strip()
+    if wid and cookie:
+        _debug("using env credentials")
+        result = {"workspace_id": wid, "auth_cookie": cookie}
+        if total_budget is not None:
+            result["total_budget"] = total_budget
+        return result
+
+    go_paths = [
+        _STATE_DIR / "opencode-go-credentials.json",
+        Path.home() / ".config" / "opencode" / "opencode-go-usage.json",
+    ]
+    for path in go_paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        api_key = data.get("api_key", "").strip()
-        if not api_key:
-            continue
-        workspace_id = data.get("workspace_id", "").strip() or workspace_id
-        _debug(f"using credentials from {path}")
-        return {"api_key": api_key, "workspace_id": workspace_id}
+        wid = data.get("workspaceId") or data.get("workspace_id") or ""
+        cookie = data.get("authCookie") or data.get("auth_cookie") or ""
+        if wid and cookie:
+            _debug(f"using Go credentials from {path} (workspace={wid})")
+            result = {"workspace_id": wid, "auth_cookie": cookie}
+            if total_budget is not None:
+                result["total_budget"] = total_budget
+            return result
     return None
-
-
-def _is_auth_failure(msg: str | None) -> bool:
-    if not msg:
-        return False
-    lowered = msg.lower()
-    return "api key" in lowered or "not configured" in lowered or "401" in msg or "403" in msg
 
 
 # ── daily spend tracking ────────────────────────────────────────────────────
@@ -135,60 +153,47 @@ def _compute_daily_spend(current_balance: float) -> dict:
 # ── balance fetch ───────────────────────────────────────────────────────────
 
 
-async def _fetch_balance_api(api_key: str) -> dict | None:
-    """Try the proposed Zen balance API."""
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "User-Agent": _USER_AGENT,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
-            resp = await http.get(ZEN_BALANCE_API, headers=headers)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, dict) and "balance" in data:
-                _debug(f"balance API returned {data.get('balance')}")
-                return data
-        _debug(f"balance API returned HTTP {resp.status_code}, falling back to scrape")
-    except (httpx.HTTPError, json.JSONDecodeError) as e:
-        _debug(f"balance API failed: {e}")
-    return None
-
-
-async def _scrape_dashboard(workspace_id: str, api_key: str) -> float | None:
-    """Fallback: scrape Zen dashboard for balance."""
-    if not workspace_id:
+async def _scrape_dashboard(workspace_id: str, auth_cookie: str) -> float | None:
+    """Scrape billing page for Zen balance using Go's auth cookie."""
+    if not workspace_id or not auth_cookie:
         return None
     url = ZEN_DASHBOARD_URL.format(workspace_id=workspace_id)
     headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Cookie": f"auth={api_key}",
+        "Cookie": f"auth={auth_cookie}",
         "User-Agent": _USER_AGENT,
     }
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
             resp = await http.get(url, headers=headers)
         if resp.status_code >= 400:
-            _debug(f"dashboard scrape HTTP {resp.status_code}")
+            _debug(f"billing page HTTP {resp.status_code}")
             return None
-        # Look for balance patterns in the page
+        # Look for balance patterns in SSR HTML
         patterns = [
-            r'balance["\']?\s*:\s*["\']?([\d.]+)',
-            r'Balance["\']?\s*:\s*["\']?\$?([\d.]+)',
-            r'credit["\']?\s*:\s*["\']?([\d.]+)',
+            # Keep the fractional component: a JSON value such as
+            # "balance": 9.21 must not be reported as $9.00.
+            r'balance["\']?\s*:\s*["\']?(\d+(?:\.\d+)?)',
+            r'\$?(\d+\.\d{2})\s*balance',
+            r'"balanceValue"[^>]*>\$?(\d+\.\d{2})',
+            r'formatBalance\((\d+)\)',
+            r'\$?(\d+\.\d{2})\s*remaining',
         ]
         for pat in patterns:
-            m = re.search(pat, resp.text)
-            if m:
+            for m in re.finditer(pat, resp.text, re.IGNORECASE):
                 try:
-                    return float(m.group(1))
-                except ValueError:
+                    val = float(m.group(1))
+                    if val > 0:
+                        # Raw satoshi value (divided by 1e8 in formatBalance)
+                        if val > 1e6:
+                            val = val / 1e8
+                        _debug(f"found balance: {val}")
+                        return val
+                except (ValueError, IndexError):
                     continue
-        _debug("no balance pattern found in dashboard")
+        _debug("no balance pattern found in billing page")
         return None
     except httpx.HTTPError as e:
-        _debug(f"dashboard scrape failed: {e}")
+        _debug(f"billing scrape failed: {e}")
         return None
 
 
@@ -203,41 +208,43 @@ async def poll() -> PluginResponse:
     creds = _read_credentials()
     if creds is None:
         return PluginResponse.failure(
-            "Zen: API key not configured — set ZEN_API_KEY env var "
-            "or create ~/.config/clawdmeter/zen-credentials.json",
+            "Zen: no credentials found — configure Go plugin first "
+            "(set OPENCODE_GO_WORKSPACE_ID + OPENCODE_GO_AUTH_COOKIE)",
             retry=False,
         )
 
-    api_key = creds.get("api_key", "")
     workspace_id = creds.get("workspace_id", "")
-    if not api_key:
-        return PluginResponse.failure("Zen: API key is empty", retry=False)
+    auth_cookie = creds.get("auth_cookie", "")
+    total_budget = creds.get("total_budget", None)
 
-    if _is_auth_failure(req.last_error):
-        _debug("repeated auth failure, returning retry:false")
+    if not workspace_id:
         return PluginResponse.failure(
-            "Zen: API key invalid — please update your credentials", retry=False
+            "Zen: workspace_id is required", retry=False
+        )
+
+    if not auth_cookie:
+        return PluginResponse.failure(
+            "Zen: auth cookie is required — refresh your Go credentials", retry=False
         )
 
     # ── fetch balance ──────────────────────────────────────────────────
-    balance_data = await _fetch_balance_api(api_key)
+    _debug("attempting billing page scrape")
+    balance_val = await _scrape_dashboard(workspace_id, auth_cookie)
 
-    if balance_data is None:
-        # Fallback to dashboard scraping
-        if workspace_id:
-            _debug("attempting dashboard scrape")
-            balance_val = await _scrape_dashboard(workspace_id, api_key)
-            if balance_val is not None:
-                balance_data = {"balance": balance_val, "currency": "USD"}
-        if balance_data is None:
-            return PluginResponse.failure(
-                "Zen: unable to fetch balance (API + dashboard scrape both failed)",
-                retry=True,
-            )
+    if balance_val is None:
+        return PluginResponse.failure(
+            "Zen: unable to fetch balance from billing page",
+            retry=True,
+        )
+    balance_data = {"balance": balance_val, "currency": "USD"}
 
     # ── extract balance ────────────────────────────────────────────────
     balance = float(balance_data.get("balance", 0) or 0)
-    currency = str(balance_data.get("currency", "USD") or "USD")
+
+    # ── compute total spent from budget ────────────────────────────────
+    total_spent = None
+    if total_budget is not None and total_budget > 0:
+        total_spent = max(0.0, total_budget - balance)
 
     # ── compute daily spend ────────────────────────────────────────────
     daily = _compute_daily_spend(balance)
@@ -246,8 +253,9 @@ async def poll() -> PluginResponse:
     payload = build_zen_usage_payload(
         balance_data, now=time.time(),
         daily_spent=daily["daily_spent"],
-        daily_spent_pct=daily["daily_spent_pct"],
         daily_reset_mins=daily["reset_mins"],
+        total_budget=total_budget,
+        total_spent=total_spent,
     )
     return PluginResponse.success(payload)
 

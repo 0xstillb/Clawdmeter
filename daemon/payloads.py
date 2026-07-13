@@ -420,20 +420,23 @@ def build_openrouter_usage_payload(key_data: dict, *, now: float | None = None,
 
 def build_zen_usage_payload(balance_data: dict, *, now: float | None = None,
                              daily_spent: float = 0,
-                             daily_spent_pct: int = 0,
-                             daily_reset_mins: int = 1440) -> dict:
+                             daily_reset_mins: int = 1440,
+                             total_budget: float | None = None,
+                             total_spent: float | None = None) -> dict:
     """Build a BLE payload from OpenCode Zen balance data (prepaid).
 
-    OpenCode Zen is a prepaid balance system ($20 increments).
+    Scrapes the billing page using Go's auth cookie — there is no
+    standalone Zen balance API.
 
-    Attempts the proposed API ``GET /zen/v1/balance`` first::
+    total_budget: user-configured total top-up ($). When None, firmware
+                  defaults to $20 for bar scaling.
+                  Set via Zen credentials dialog or zen-credentials.json.
+    total_spent:  total_budget - balance (used). When None, falls back to
+                  daily_spent for the top card.
 
-        {
-            "balance": 42.50,
-            "currency": "USD"
-        }
-
-    Falls back to parsing scraped dashboard data with ``balance`` key.
+    Card layout (raw $ amounts, no % conversion):
+      - Top:  total used — pct = total_spent (budget - remaining)
+      - Bottom: remaining — pct = dollar balance remaining
     """
     if not isinstance(balance_data, dict):
         balance_data = {}
@@ -441,40 +444,50 @@ def build_zen_usage_payload(balance_data: dict, *, now: float | None = None,
     balance = float(balance_data.get("balance", 0) or 0)
     currency = str(balance_data.get("currency", "USD") or "USD")
 
-    # Without a configured total, treat balance itself as the "budget"
-    remaining_pct = min(100, int(balance)) if balance > 0 else 0
+    # Top card: total used (budget - remaining), fallback to daily spend
+    top_amount = total_spent if total_spent is not None else daily_spent
+    top_subtext = f"${top_amount:.2f}" if top_amount > 0 else "no spend"
 
-    status = _prepaid_status(remaining_pct)
+    # Status based on raw dollar thresholds
+    if balance < 1.0:
+        status = "limited"
+    elif balance < 5.0:
+        status = "warning"
+    else:
+        status = "allowed"
 
-    return build_provider_payload(
+    payload = build_provider_payload(
         provider="zen",
         mode="prepaid",
         plan_type="prepaid",
         top={
-            "label": "Today",
+            "label": "Used",
             "kind": "budget_daily",
-            "pct": daily_spent_pct,
+            "pct": round(top_amount, 2),
             "reset_mins": daily_reset_mins,
             "has_reset": daily_reset_mins > 0,
-            "subtext": f"{daily_spent:.2f} {currency} spent" if daily_spent > 0 else "no spend",
+            "subtext": top_subtext,
         },
         bottom={
-            "label": currency,
+            "label": "Remaining",
             "kind": "wallet_depletion",
-            "pct": remaining_pct,
+            "pct": round(balance, 2),
             "reset_mins": 0,
             "has_reset": False,
-            "subtext": f"{balance:.2f}",
+            "subtext": f"${balance:.2f}",
         },
         status=status,
         ok=True,
         legacy_aliases={
-            "s": remaining_pct,
+            "s": round(balance, 2),
             "sr": 0,
-            "w": daily_spent_pct,
+            "w": round(daily_spent, 2),
             "wr": daily_reset_mins,
         },
     )
+    if total_budget is not None and total_budget > 0:
+        payload["budget"] = round(total_budget, 2)
+    return payload
 
 
 def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict:
@@ -554,6 +567,7 @@ def build_codex_usage_payload(payload: Mapping[str, object], *, now: float | Non
     current_time = time.time() if now is None else now
     session_pct = _remaining_pct(primary.get("used_percent"))
     session_reset = _reset_minutes_from_window(primary, current_time)
+    has_secondary_window = "used_percent" in secondary
     weekly_pct = _remaining_pct(secondary.get("used_percent"))
     weekly_reset = _reset_minutes_from_window(secondary, current_time)
 
@@ -568,6 +582,45 @@ def build_codex_usage_payload(payload: Mapping[str, object], *, now: float | Non
         status = "limited"
     else:
         status = "unknown"
+
+    # Codex now returns a single weekly window for some accounts.  The old
+    # response had a five-hour primary window plus a weekly secondary window.
+    # Do not manufacture a second 100% window when that secondary payload is
+    # absent: make the real weekly value the sole visible card instead.
+    if not has_secondary_window:
+        weekly_pct = session_pct
+        weekly_reset = session_reset
+        return build_provider_payload(
+            provider="codex",
+            mode="weekly_only",
+            top={
+                "label": "Weekly",
+                "kind": "window_long",
+                "pct": weekly_pct,
+                "reset_mins": weekly_reset,
+                "has_reset": weekly_reset > 0,
+                "subtext": "reset unavailable" if weekly_reset <= 0 else "",
+            },
+            # Provider payloads require two panels. Firmware that understands
+            # weekly_only hides this placeholder; a transport that must flatten
+            # the payload can use the aliases below for both cards instead of a
+            # stale 100% value.
+            bottom={
+                "label": "Unavailable",
+                "kind": "hidden",
+                "pct": 0,
+                "reset_mins": 0,
+                "has_reset": False,
+                "subtext": "not applicable",
+            },
+            status=str(status),
+            legacy_aliases={
+                "s": weekly_pct,
+                "sr": weekly_reset,
+                "w": weekly_pct,
+                "wr": weekly_reset,
+            },
+        )
 
     return build_windowed_payload(
         provider="codex",

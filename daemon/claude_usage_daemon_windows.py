@@ -554,9 +554,24 @@ def _payload_for_wire(payload: dict) -> dict:
     Windows WinRT writes to the ESP32's RX characteristic can reject larger JSON
     payloads even though the semantic data is valid. The firmware still accepts
     the compact flat shape, so prefer it on the wire when possible.
+
+    For prepaid providers the full provider-shaped payload (top/bottom/plan_type)
+    is kept intact so the ESP can show dollar amounts instead of percentages.
     """
     alias_keys = ("s", "sr", "w", "wr", "st", "ok")
     if not all(key in payload for key in alias_keys):
+        return payload
+
+    # Keep full payload for prepaid and single-window Codex. The flat form
+    # loses panel kind/subtext and, for Codex, the weekly_only marker used by
+    # firmware to avoid displaying a fictitious second limit. Keep the normal
+    # two-window Codex payload compact for WinRT's smaller write budget.
+    plan_type = payload.get("plan_type")
+    provider = payload.get("p")
+    if (
+        (isinstance(plan_type, str) and plan_type and plan_type != "subscription")
+        or (provider == "codex" and payload.get("mode") == "weekly_only")
+    ):
         return payload
 
     wire = {

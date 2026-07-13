@@ -38,6 +38,8 @@ def build_harness() -> Path:
         "provider_claude_window",
         "provider_wallet_subtext",
         "invalid_payload",
+        "zen_prepaid",
+        "codex_weekly_only",
     ],
 )
 def test_usage_payload_harness_scenarios(scenario: str) -> None:

@@ -1113,9 +1113,13 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
 
     int pct = static_cast<int>(panel->pct + 0.5f);
 
-    // ── prepaid bottom card: show balance amount (e.g. "55.00 CNY") ──
-    const bool prepaid_balance = (is_prepaid && strcmp(panel->kind, "wallet_depletion") == 0);
-    if (prepaid_balance) {
+    // ── prepaid cards: show dollar amounts from subtext ────────────────
+    const bool prepaid_card = (
+        is_prepaid
+        && (strcmp(panel->kind, "wallet_depletion") == 0
+            || strcmp(panel->kind, "budget_daily") == 0)
+    );
+    if (prepaid_card) {
         lv_label_set_text(widgets->pct, panel->subtext[0] ? panel->subtext : "---");
         lv_label_set_text(widgets->pill, panel->label[0] ? panel->label : default_pill_text(top));
     } else {
@@ -1125,6 +1129,12 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
 
     // ── bar: remaining % for wallet_depletion, spent% for budget_daily ──
     int bar_pct = pct;
+    // Prepaid raw-dollar cards: scale bar relative to configured budget
+    if (prepaid_card && pct > 0) {
+        float budget = current_usage.budget > 0 ? current_usage.budget : 20.0f;
+        bar_pct = pct >= budget ? 100 : (int)((pct / budget) * 100.0f);
+        if (bar_pct > 100) bar_pct = 100;
+    }
 
     if (widgets->bar_fill) {
         const int track_w = L.card_w - L.card_pad_l - L.card_pad_r;
@@ -1137,11 +1147,29 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     }
     lv_label_set_text(widgets->meta_left, meta_left);
     format_panel_meta_right(panel, meta_right, sizeof(meta_right));
-    // ── prepaid balance card: show remaining % in meta, not the $ amount ──
-    if (prepaid_balance) {
-        snprintf(meta_right, sizeof(meta_right), "%d%% left", pct);
+    // ── prepaid cards: override meta with subtext (dollar amounts) ──
+    if (prepaid_card) {
+        snprintf(meta_left, sizeof(meta_left), "%s", panel->label[0] ? panel->label : default_pill_text(top));
+        snprintf(meta_right, sizeof(meta_right), "%s", panel->subtext[0] ? panel->subtext : "---");
     }
+    lv_label_set_text(widgets->meta_left, meta_left);
     lv_label_set_text(widgets->meta_right, meta_right);
+}
+
+static void set_single_weekly_limit_layout(bool enabled) {
+    if (!panel_top.root || !panel_bottom.root) return;
+
+    // Codex no longer exposes a five-hour window on some plans. Centre the
+    // one real weekly card instead of leaving a misleading, static second card.
+    const int top_y = enabled
+        ? L.card1_y + (L.card2_y - L.card1_y) / 2
+        : L.card1_y;
+    lv_obj_set_pos(panel_top.root, L.card_x, top_y);
+    if (enabled) {
+        lv_obj_add_flag(panel_bottom.root, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(panel_bottom.root, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void set_idle_label_text(bool with_cursor) {
@@ -1555,6 +1583,11 @@ void ui_update(const UsageData* data) {
     if (data->valid) last_data_ms = lv_tick_get();
 
     update_header_provider();
+    const bool single_weekly_limit = (
+        data->provider == USAGE_PROVIDER_CODEX
+        && strcmp(data->mode, "weekly_only") == 0
+    );
+    set_single_weekly_limit_layout(single_weekly_limit);
     set_usage_panel(&panel_top, &data->top, true);
     set_usage_panel(&panel_bottom, &data->bottom, false);
 

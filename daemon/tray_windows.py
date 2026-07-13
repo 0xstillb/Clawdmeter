@@ -279,14 +279,157 @@ def _openrouter_dialog(ts: object = None) -> None:
     )
 
 def _zen_dialog(ts: object = None) -> None:
-    _apikey_dialog(
-        title="OpenCode Zen — API Key",
-        provider_id="zen",
-        cred_filename="zen-credentials.json",
-        label="Zen API Key",
-        help_text="Get this from opencode.ai → Settings → API Keys",
-        ts=ts,
+    """Open a Tkinter dialog to set OpenCode Zen credentials.
+
+    Zen borrows workspace_id + auth_cookie from Go credentials.
+    Total Budget is user-configurable for bar scaling.
+
+    Args:
+        ts: Optional TrayState — if provided, shows a notification and
+            triggers provider refresh after saving.
+    """
+    import tkinter as tk
+    from tkinter import messagebox
+
+    config_dir = Path.home() / ".config" / "clawdmeter"
+    zen_file = config_dir / "zen-credentials.json"
+    go_file = config_dir / "opencode-go-credentials.json"
+
+    # ── read existing ──────────────────────────────────────────────────
+    existing_budget = ""
+    if zen_file.exists():
+        try:
+            data = json.loads(zen_file.read_text(encoding="utf-8"))
+            tb = data.get("total_budget")
+            if tb is not None:
+                existing_budget = str(tb)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    go_wid = ""
+    if go_file.exists():
+        try:
+            data = json.loads(go_file.read_text(encoding="utf-8"))
+            go_wid = data.get("workspace_id", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    win = tk.Tk()
+    win.title("OpenCode Zen — Credentials")
+    win.resizable(False, False)
+    win.configure(bg="#1e1e1e")
+    win.update_idletasks()
+    w, h = 520, 300
+    x = (win.winfo_screenwidth() - w) // 2
+    y = (win.winfo_screenheight() - h) // 2
+    win.geometry(f"{w}x{h}+{x}+{y}")
+
+    label_font = ("Segoe UI", 10, "bold")
+    entry_font = ("Consolas", 10)
+    btn_font = ("Segoe UI", 10)
+
+    # ── Status label ──
+    lbl_status = tk.Label(
+        win, text="", bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9),
     )
+    lbl_status.pack(anchor="w", **{"padx": 20, "pady": (4, 0)})
+
+    def _set_status(msg: str, color: str = "#cccccc") -> None:
+        lbl_status.config(text=msg, fg=color)
+        win.update_idletasks()
+
+    def _save() -> None:
+        budget_str = entry_budget.get().strip()
+        _set_status("Saving…", "#5a7aff")
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if budget_str:
+                try:
+                    data["total_budget"] = float(budget_str)
+                except ValueError:
+                    messagebox.showerror("Error", "Total Budget must be a number", parent=win)
+                    return
+            zen_file.write_text(
+                json.dumps(data, indent=2), encoding="utf-8"
+            )
+        except OSError as e:
+            _set_status("", "#cccccc")
+            messagebox.showerror("Error", f"Failed to save:\n{e}", parent=win)
+            return
+
+        from daemon.config import set_provider
+        set_provider("zen")
+
+        if ts is not None:
+            ts.request_refresh()
+
+        _set_status("✅ Saved! Provider set to Zen.", "#5a7aff")
+        win.after(1200, win.destroy)
+
+    pad = {"padx": 20, "pady": (20, 0)}
+    pad_small = {"padx": 20, "pady": (8, 0)}
+    pad_btn = {"padx": 20, "pady": (16, 20)}
+
+    # ── Go workspace (read-only) ──
+    if go_wid:
+        frm_wid = tk.Frame(win, bg="#1e1e1e")
+        frm_wid.pack(fill="x", **pad_small)
+        lbl_wid = tk.Label(
+            frm_wid, text="Workspace (from Go)", bg="#1e1e1e", fg="#888888",
+            font=("Segoe UI", 9), anchor="w",
+        )
+        lbl_wid.pack(side=tk.LEFT)
+        lbl_wid_val = tk.Label(
+            frm_wid, text=go_wid, bg="#1e1e1e", fg="#5a7aff",
+            font=("Consolas", 9), anchor="w",
+        )
+        lbl_wid_val.pack(side=tk.LEFT, padx=(8, 0))
+    else:
+        frm_wid = tk.Frame(win, bg="#1e1e1e")
+        frm_wid.pack(fill="x", **pad_small)
+        lbl_nogo = tk.Label(
+            frm_wid, text="⚠  No Go credentials found — configure Go first",
+            bg="#1e1e1e", fg="#d08050", font=("Segoe UI", 9), anchor="w",
+        )
+        lbl_nogo.pack()
+
+    # ── Total Budget field ──
+    frm_budget = tk.Frame(win, bg="#1e1e1e")
+    frm_budget.pack(fill="x", **pad_small)
+    lbl_budget = tk.Label(frm_budget, text="Total Budget ($)", bg="#1e1e1e", fg="#e0e0e0",
+                          font=label_font, width=20, anchor="w")
+    lbl_budget.pack(side=tk.LEFT)
+    entry_budget = tk.Entry(frm_budget, font=entry_font, bg="#2d2d2d", fg="#ffffff",
+                            insertbackground="#ffffff", relief=tk.FLAT, bd=6)
+    entry_budget.insert(0, existing_budget)
+    entry_budget.pack(side=tk.LEFT, fill="x", expand=True)
+
+    lbl_budget_help = tk.Label(
+        win, text="Set your total top-up amount so the bar shows correctly. (e.g. 20)",
+        justify=tk.LEFT, bg="#1e1e1e", fg="#777777", font=("Segoe UI", 8),
+    )
+    lbl_budget_help.pack(anchor="w", **{"padx": 20, "pady": (4, 0)})
+
+    # ── Buttons ──
+    frm_btn = tk.Frame(win, bg="#1e1e1e")
+    frm_btn.pack(fill="x", **pad_btn)
+
+    btn_save = tk.Button(
+        frm_btn, text="✓  Save", command=_save,
+        bg="#3a5fd7", fg="white", font=btn_font,
+        relief=tk.FLAT, padx=20, pady=5, cursor="hand2",
+    )
+    btn_save.pack(side=tk.RIGHT, padx=(8, 0))
+
+    btn_cancel = tk.Button(frm_btn, text="Cancel", command=win.destroy,
+                           bg="#3a3a3a", fg="#cccccc", font=btn_font,
+                           relief=tk.FLAT, padx=20, pady=5, cursor="hand2")
+    btn_cancel.pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda _: _save())
+    entry_budget.focus_set()
+    win.mainloop()
 
 
 # ── OpenCode Go settings dialog ────────────────────────────────────────────
@@ -876,7 +1019,7 @@ def main() -> None:
             Menu(
                 MenuItem("DeepSeek API Key...", _on_deepseek_settings),
                 MenuItem("OpenRouter API Key...", _on_openrouter_settings),
-                MenuItem("Zen API Key...", _on_zen_settings),
+                MenuItem("Zen Settings...", _on_zen_settings),
                 MenuItem("OpenCode Go...", _on_opencode_go_settings),
             )
         ),

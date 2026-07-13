@@ -117,6 +117,59 @@ static void test_invalid_payload() {
     expect(!usage_parse_json(json, &data), "payload missing both legacy and provider panels should fail");
 }
 
+static void test_zen_prepaid() {
+    const char* json = R"json({
+      "p":"zen",
+      "plan_type":"prepaid",
+      "mode":"prepaid",
+      "top":{"label":"Used","pct":0.79,"subtext":"$0.79","reset_mins":197,"has_reset":true,"kind":"budget_daily"},
+      "bottom":{"label":"Remaining","pct":9.21,"subtext":"$9.21","reset_mins":0,"has_reset":false,"kind":"wallet_depletion"},
+      "st":"allowed",
+      "ok":true,
+      "s":9.21,
+      "sr":0,
+      "w":0.36,
+      "wr":197,
+      "budget":10.0
+    })json";
+    UsageData data{};
+    expect(usage_parse_json(json, &data), "Zen prepaid payload should parse");
+    expect(data.valid, "Zen payload should mark data valid");
+    expect(data.provider == USAGE_PROVIDER_ZEN, "provider should be Zen");
+    expect_streq(data.plan_type, "prepaid", "plan_type should be prepaid");
+    expect_streq(data.mode, "prepaid", "mode should be prepaid");
+    expect_streq(data.top.label, "Used", "top label should be Used");
+    expect_streq(data.bottom.label, "Remaining", "bottom label should be Remaining");
+    expect_streq(data.top.kind, "budget_daily", "top kind should be budget_daily");
+    expect_streq(data.bottom.kind, "wallet_depletion", "bottom kind should be wallet_depletion");
+    expect(data.top.pct == 0.79f, "top pct should be 0.79 (total used)");
+    expect(data.bottom.pct == 9.21f, "bottom pct should be 9.21 (raw dollar)");
+    expect_streq(data.top.subtext, "$0.79", "top subtext should be raw dollar");
+    expect_streq(data.bottom.subtext, "$9.21", "bottom subtext should show remaining");
+    expect(data.budget == 10.0f, "budget should be parsed from payload");
+}
+
+static void test_codex_weekly_only() {
+    const char* json = R"json({
+      "p":"codex",
+      "mode":"weekly_only",
+      "top":{"label":"Weekly","pct":63,"reset_mins":4320,"has_reset":true,"kind":"window_long"},
+      "bottom":{"label":"Unavailable","pct":0,"reset_mins":0,"has_reset":false,"subtext":"not applicable","kind":"hidden"},
+      "st":"allowed",
+      "ok":true,
+      "s":63,
+      "sr":4320,
+      "w":63,
+      "wr":4320
+    })json";
+    UsageData data{};
+    expect(usage_parse_json(json, &data), "single-window Codex payload should parse");
+    expect(data.provider == USAGE_PROVIDER_CODEX, "provider should be Codex");
+    expect_streq(data.mode, "weekly_only", "mode should flag a single weekly limit");
+    expect_streq(data.top.label, "Weekly", "top panel should be the weekly limit");
+    expect(data.top.pct == 63.0f, "top panel should use the weekly remaining percent");
+}
+
 int main(int argc, char** argv) {
     expect(argc == 2, "expected exactly one scenario argument");
 
@@ -130,6 +183,10 @@ int main(int argc, char** argv) {
         test_provider_wallet_subtext();
     } else if (std::strcmp(argv[1], "invalid_payload") == 0) {
         test_invalid_payload();
+    } else if (std::strcmp(argv[1], "zen_prepaid") == 0) {
+        test_zen_prepaid();
+    } else if (std::strcmp(argv[1], "codex_weekly_only") == 0) {
+        test_codex_weekly_only();
     } else {
         std::cerr << "unknown scenario: " << argv[1] << std::endl;
         return 2;

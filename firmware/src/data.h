@@ -33,4 +33,5 @@ struct UsageData {
     char status[24];
     bool ok;
     bool valid;
+    float budget;            // total prepaid budget ($), 0 = unknown
 };

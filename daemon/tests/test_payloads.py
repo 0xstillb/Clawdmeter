@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from daemon.payloads import (
+    build_codex_usage_payload,
     build_opencode_go_payload,
     build_deepseek_usage_payload,
     build_openrouter_usage_payload,
@@ -28,6 +29,32 @@ def test_build_opencode_go_payload_uses_remaining_percent() -> None:
     assert payload["top"]["pct"] == 100
     assert payload["bottom"]["pct"] == 75
     assert payload["st"] == "m50"
+
+
+def test_build_codex_usage_payload_maps_single_window_to_weekly() -> None:
+    now = time.time()
+    payload = build_codex_usage_payload(
+        {
+            "rate_limit": {
+                "allowed": True,
+                "primary_window": {
+                    "used_percent": 37,
+                    "reset_after_seconds": 3 * 24 * 60 * 60,
+                },
+            },
+        },
+        now=now,
+    )
+
+    assert payload["p"] == "codex"
+    assert payload["mode"] == "weekly_only"
+    assert payload["top"]["label"] == "Weekly"
+    assert payload["top"]["kind"] == "window_long"
+    assert payload["top"]["pct"] == 63
+    assert payload["top"]["reset_mins"] == 4320
+    # Legacy firmware should still see the one real value, not a fixed 100%.
+    assert payload["s"] == 63
+    assert payload["w"] == 63
 
 
 def test_build_opencode_go_payload_preserves_missing_reset_subtext() -> None:
@@ -99,16 +126,18 @@ def test_build_zen_prepaid_payload() -> None:
     now = time.time()
     p = build_zen_usage_payload(
         {"balance": 42.50, "currency": "USD"}, now=now,
-        daily_spent=0, daily_spent_pct=0, daily_reset_mins=720,
+        daily_spent=0, daily_reset_mins=720,
     )
     assert p["p"] == "zen"
     assert p["plan_type"] == "prepaid"
     assert p["top"]["kind"] == "budget_daily"
     assert p["top"]["pct"] == 0
+    assert p["top"]["subtext"] == "no spend"
     assert p["bottom"]["kind"] == "wallet_depletion"
-    assert p["bottom"]["pct"] == 42
-    assert p["bottom"]["label"] == "USD"
-    assert p["bottom"]["subtext"] == "42.50"
+    assert p["bottom"]["pct"] == 42.5
+    assert p["bottom"]["label"] == "Remaining"
+    assert p["bottom"]["subtext"] == "$42.50"
+    assert p["top"]["label"] == "Used"
     assert p["st"] == "allowed"
 
 

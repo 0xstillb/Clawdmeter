@@ -11,6 +11,7 @@ import pytest
 from daemon.config import config_path, provider_preference, set_provider
 from daemon.claude_usage_daemon_windows import (
     _account_id_from_id_token,
+    _payload_for_wire,
     _read_codex_credentials,
     _select_usage_source,
     _usage_payload_from_codex_response,
@@ -94,6 +95,24 @@ def test_usage_payload_from_codex_response():
     assert payload["w"] == 51
     assert abs(payload["sr"] - 60) <= 1
     assert abs(payload["wr"] - 120) <= 1
+
+
+def test_codex_weekly_only_payload_is_not_flattened_for_wire():
+    payload = _usage_payload_from_codex_response({
+        "rate_limit": {
+            "allowed": True,
+            "primary_window": {
+                "used_percent": 25,
+                "reset_after_seconds": 3600,
+            },
+        },
+    })
+
+    assert payload is not None
+    wire = _payload_for_wire(payload)
+    assert wire["p"] == "codex"
+    assert wire["mode"] == "weekly_only"
+    assert wire["top"]["label"] == "Weekly"
 
 
 def test_select_usage_source_prefers_codex(monkeypatch):

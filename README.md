@@ -1,6 +1,7 @@
 # Clawdmeter
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+A desk-side ESP32 dashboard for keeping an eye on Claude Code, Codex, and
+other supported coding-provider usage.
 
 It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
 busier when your usage rate climbs. The two side buttons send Space and
@@ -19,7 +20,7 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 |              Splash               |              Usage              |
 | :-------------------------------: | :-----------------------------: |
 | ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+|   Splash; touch-toggle anytime    | Provider usage and reset time   |
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
@@ -34,6 +35,113 @@ Boards supported out of the box:
 > Please check if a pull request exists for your alternative hardware port before opening a new one, providing QA feedback and testing on the same hardware is more valuable than duplicate pull requests.
 
 **Porting to another board:** the firmware is a thin HAL with per-board folders under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env — `main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md) for the interfaces a port must implement.
+
+## First-time setup: ESP32 + host
+
+Clawdmeter has two parts that must both be running:
+
+1. **Firmware** on the ESP32 display — renders the UI, touch input, BLE, and
+   HID buttons.
+2. **Host daemon** on the computer where Claude Code/Codex is signed in —
+   reads usage, then writes it to the display over Bluetooth.
+
+### 1. Choose the correct firmware environment
+
+Use the PlatformIO environment that matches the board. The two S3 AMOLED
+boards are the primary, fully documented targets; the other environments are
+available for their matching hardware.
+
+| Board | PlatformIO environment | Notes |
+| --- | --- | --- |
+| Waveshare ESP32-S3-Touch-AMOLED-2.16 | `waveshare_amoled_216` | 480×480 AMOLED; three buttons; battery and rotation support. |
+| Waveshare ESP32-S3-Touch-AMOLED-1.8 | `waveshare_amoled_18` | 368×448 AMOLED; original and later panel revisions are detected at boot. |
+| Waveshare ESP32-C6-Touch-AMOLED-2.16 | `waveshare_amoled_216_c6` | C6 port; framebuffer screenshots are unsupported because it has no PSRAM. |
+| Sunton 2432S028 variants | `sunton_2432s028r`, `sunton_2432s028rv2`, `sunton_2432s028rv3` and `_landscape` variants | Select the environment matching the panel controller and orientation. |
+
+To see the authoritative list in your checkout, inspect
+[`firmware/platformio.ini`](firmware/platformio.ini).
+
+### 2. Install PlatformIO and build the firmware
+
+Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html), then open a terminal in the repository root. Build before flashing so that pin, library, and board-selection errors are caught first.
+
+```bash
+# Build the 2.16-inch S3 AMOLED firmware
+pio run -d firmware -e waveshare_amoled_216
+
+# Build the 1.8-inch S3 AMOLED firmware
+pio run -d firmware -e waveshare_amoled_18
+```
+
+If `pio` is not on your `PATH`, PlatformIO's usual installed location is
+`~/.platformio/penv/bin/pio` on macOS/Linux and
+`%USERPROFILE%\.platformio\penv\Scripts\pio.exe` on Windows.
+
+### 3. Connect and flash the ESP32
+
+Use a **data-capable USB cable**. The S3 boards expose native USB-JTAG/serial;
+normally no manual boot-mode sequence is necessary. Close any serial monitor
+before uploading.
+
+```powershell
+# Windows: discover the COM port in Device Manager, then flash.
+pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port COM5
+pio run -d firmware -e waveshare_amoled_18  -t upload --upload-port COM5
+```
+
+```bash
+# Linux
+pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0
+
+# macOS
+pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101
+```
+
+After a successful upload the device starts on the splash screen. Tap the
+display to open Usage. A blank screen usually means an incorrect board
+environment, a charge-only USB cable, or (for an S3 AMOLED port) missing OPI
+PSRAM configuration — do not flash an environment intended for a different
+panel.
+
+### 4. Pair over Bluetooth, then install the host daemon
+
+Pair **Clawdmeter** from the host operating system's Bluetooth settings. It is
+also a BLE HID keyboard, so pairing is required for the physical buttons as
+well as usage data. Then follow the OS-specific installer below.
+
+The daemon scans for the name `Clawdmeter`, caches the resolved BLE address,
+and refreshes usage about every 60 seconds. If you move to another physical
+board, remove the old device from Bluetooth (or reset pairing on the device)
+so the daemon can discover the new address.
+
+### Verify a flashed screen
+
+On PSRAM-capable boards, capture the live framebuffer after a UI change:
+
+```bash
+# Linux
+./scripts/linux/screenshot.sh screenshot.png /dev/ttyACM0
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts\windows\screenshot.ps1 -ListPorts
+powershell -ExecutionPolicy Bypass -File scripts\windows\screenshot.ps1 -Output screenshot.png -Port COM5
+```
+
+The C6 and non-PSRAM LCD environments report screenshot capture as unsupported.
+
+## Updating an existing installation
+
+```bash
+git pull
+pio run -d firmware -e waveshare_amoled_216 -t upload
+```
+
+Restart the host daemon afterwards: use **Restart** from the Windows tray,
+`systemctl --user restart claude-usage-daemon` on Linux, or unload/load the
+LaunchAgent on macOS. Re-run the OS installer if Python dependencies or the
+autostart configuration changed.
 
 ## Repo layout
 
@@ -51,7 +159,7 @@ Boards supported out of the box:
 - Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
-- Claude Code with an active subscription
+- Claude Code and/or Codex signed in on the host computer
 
 ## macOS installation
 
@@ -179,7 +287,8 @@ python daemon\claude_usage_daemon_windows.py        # runs in the foreground; Ct
 The icon's corner bubble shows state — **green** Connected, **amber** Scanning, **red** Error — and hovering shows the status (`Connected · last update HH:MM`). A notification fires once when it enters Error (e.g. an expired token). Right-click for the menu:
 
 - **Status header** — live state + last sync time.
-- **Provider** — switch Auto / Codex / Claude without restarting; the choice is saved under `%LOCALAPPDATA%\Clawdmeter\config.json`.
+- **Provider** — switch among the discovered providers without restarting; the choice is saved under `%LOCALAPPDATA%\Clawdmeter\config.json`.
+- **Credentials** — configure DeepSeek, OpenRouter, Zen, or OpenCode Go when those provider plugins are installed. Zen uses the OpenCode Go workspace/auth credentials plus its own optional total-budget setting.
 - **Start at login** — toggle autostart on/off.
 - **Quit** — stops the daemon cleanly; leaves the Windows pairing intact (device keeps its last reading).
 
@@ -203,17 +312,19 @@ Full Windows tray/setup guide: [`docs/user/windows-daemon.md`](docs/user/windows
 
 ## How it works
 
-1. The daemon reads your usage-provider credentials. macOS/Linux currently read Claude Code OAuth credentials; Windows auto-selects Codex first when `auth.json` exists, then falls back to Claude.
+1. The daemon reads your usage-provider credentials. macOS/Linux currently read Claude Code OAuth credentials; Windows can auto-select the available provider and also supports provider-specific credentials from its tray menu.
 2. Claude polling makes a minimal API call to `api.anthropic.com/v1/messages`; Codex polling reads the ChatGPT/Codex usage endpoint with the local Codex OAuth token.
-3. The usage numbers are normalized into the same small BLE payload shape (`s`, `sr`, `w`, `wr`, `st`, `ok`, plus provider `p`).
+3. The usage numbers are normalized into a BLE payload shape (`s`, `sr`, `w`, `wr`, `st`, `ok`, plus provider `p`). Codex accounts that expose only a weekly window are marked `weekly_only`; the firmware shows one Weekly card rather than a stale second limit.
 4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
 5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
+6. The firmware also tracks the rate of change of the current usage value over a 5-minute window and picks splash animations from the matching mood group.
 7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
 
 ## Physical buttons
 
-The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
+The AMOLED-2.16 board has three physical buttons. Left and right send HID
+keys; the middle (PWR) button cycles splash animations and, held for 3 seconds,
+triggers pairing mode.
 
 | Button           | GPIO         | Function                                                       |
 | ---------------- | ------------ | -------------------------------------------------------------- |
@@ -222,6 +333,10 @@ The board has three side buttons. Left and right send HID keys; the middle (PWR)
 | **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
 
 Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+
+The AMOLED-1.8 board has the BOOT button (Space) and PWR button only; it has
+no GPIO 18 / Shift+Tab button. Its screen orientation is fixed. The Sunton
+ports have their own board-specific input capabilities.
 
 ## BLE protocol
 

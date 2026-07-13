@@ -51,6 +51,7 @@ static void init_usage(UsageData* out) {
     copy_text(out->status, sizeof(out->status), "unknown");
     out->ok = false;
     out->valid = false;
+    out->budget = 20.0f;
 }
 
 static bool find_key_in_span(const char* begin, const char* end, const char* key, const char** value_out) {
@@ -267,6 +268,7 @@ static bool parse_provider_payload(const char* json, UsageData* out) {
     parse_string_field(json, end, "mode", out->mode, sizeof(out->mode));
     parse_string_field(json, end, "st", out->status, sizeof(out->status));
     parse_bool_field(json, end, "ok", &out->ok);
+    parse_float_field(json, end, "budget", &out->budget);
 
     if (!parse_panel(top_begin, top_end, &out->top)) return false;
     if (!parse_panel(bottom_begin, bottom_end, &out->bottom)) return false;
