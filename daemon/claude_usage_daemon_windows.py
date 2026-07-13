@@ -588,6 +588,46 @@ def _payload_for_wire(payload: dict) -> dict:
     return wire
 
 
+def _provider_failure_payload(provider: str, error: str | None) -> dict | None:
+    """Return a displayable payload when a selected provider cannot poll.
+
+    Zen's balance endpoint is a browser-page scrape.  If its session expires
+    or the page changes, the old behavior sent nothing at all, leaving the
+    ESP32 visibly stuck on the previous provider.  A provider-shaped failure
+    payload lets the screen switch to ZEN immediately and directs the user to
+    refresh its settings.  Other providers retain their existing retry policy.
+    """
+    if provider != "zen":
+        return None
+
+    return {
+        "p": "zen",
+        "mode": "unavailable",
+        # The firmware renders money values only for prepaid panels.  Keep the
+        # failure state prepaid too, so a zero balance is shown as USD rather
+        # than the subscription-style "0%".
+        "plan_type": "prepaid",
+        "top": {
+            "label": "Used",
+            "kind": "budget_daily",
+            "pct": 0,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": "$0.00",
+        },
+        "bottom": {
+            "label": "Remaining",
+            "kind": "wallet_depletion",
+            "pct": 0,
+            "reset_mins": 0,
+            "has_reset": False,
+            "subtext": "$0.00",
+        },
+        "st": "error",
+        "ok": False,
+    }
+
+
 async def scan_for_device():
     """Scan for DEVICE_NAME and return the BLEDevice, or None."""
     log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
@@ -991,8 +1031,10 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                         if resp.ok and resp.payload:
                             payload = resp.payload
                         else:
-                            payload = None
                             last_err = resp.error
+                            payload = _provider_failure_payload(source, resp.error)
+                            if payload is not None:
+                                log(f"{resp.error}; sending provider error state to ESP32")
                             if not resp.retry:
                                 # Permanent failure — show toast
                                 log(f"{resp.error}; notifying user")
@@ -1002,7 +1044,7 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
                                 log(f"{resp.error}; will retry")
                     except (PluginNotFoundError, PluginCrashedError) as e:
                         log(f"Plugin {source} error: {e}")
-                        payload = None
+                        payload = _provider_failure_payload(source, str(e))
                         if tray_state:
                             tray_state.set_error(str(e))
 

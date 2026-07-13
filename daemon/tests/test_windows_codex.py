@@ -11,6 +11,7 @@ import pytest
 from daemon.config import config_path, provider_preference, set_provider
 from daemon.claude_usage_daemon_windows import (
     _account_id_from_id_token,
+    _provider_failure_payload,
     _payload_for_wire,
     _read_codex_credentials,
     _select_usage_source,
@@ -50,6 +51,27 @@ def test_provider_config_overrides_env(monkeypatch):
 
     assert config_path().exists()
     assert provider_preference() == "claude"
+
+
+def test_zen_failure_payload_replaces_stale_provider_data():
+    """A Zen scrape failure still changes the ESP32 header to ZEN."""
+    payload = _provider_failure_payload("zen", "Zen: unable to fetch balance")
+
+    assert payload is not None
+    assert payload["p"] == "zen"
+    assert payload["plan_type"] == "prepaid"
+    assert payload["top"] == {
+        "label": "Used",
+        "kind": "budget_daily",
+        "pct": 0,
+        "reset_mins": 0,
+        "has_reset": False,
+        "subtext": "$0.00",
+    }
+    assert payload["bottom"]["subtext"] == "$0.00"
+    # Error payloads deliberately remain provider-shaped on the BLE wire.
+    assert _payload_for_wire(payload) == payload
+    assert _provider_failure_payload("codex", "unavailable") is None
 
 
 def test_read_codex_credentials_from_auth_json(tmp_path, monkeypatch):

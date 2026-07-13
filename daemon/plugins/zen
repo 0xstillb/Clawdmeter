@@ -50,6 +50,16 @@ _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
 _STATE_DIR = Path.home() / ".config" / "clawdmeter"
 _STATE_FILE = _STATE_DIR / "zen-state.json"
+_BALANCE_PATTERNS = (
+    # Keep the fractional component: a JSON value such as
+    # "balance": 9.21 must not be reported as $9.00.
+    r'balance["\']?\s*:\s*["\']?\$?(\d+(?:\.\d+)?)',
+    r'\bbalance\s*:\s*\$?(\d+(?:\.\d+)?)',
+    r'\$?(\d+\.\d{2})\s*balance',
+    r'"balanceValue"[^>]*>\$?(\d+\.\d{2})',
+    r'formatBalance\((\d+)\)',
+    r'\$?(\d+\.\d{2})\s*remaining',
+)
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -153,6 +163,25 @@ def _compute_daily_spend(current_balance: float) -> dict:
 # ── balance fetch ───────────────────────────────────────────────────────────
 
 
+def _extract_balance(html: str) -> float | None:
+    """Extract a Zen balance from billing HTML, including a real $0 balance."""
+    for pat in _BALANCE_PATTERNS:
+        for match in re.finditer(pat, html, re.IGNORECASE):
+            try:
+                value = float(match.group(1))
+            except (ValueError, IndexError):
+                continue
+            # The billing page can emit its balance in satoshis to format on the
+            # client. Convert that representation before returning it.
+            if value > 1e6:
+                value = value / 1e8
+            # Zero is a valid depleted Zen balance. Previously it was discarded
+            # and the daemon left the ESP32 stuck on the prior provider.
+            if value >= 0:
+                return value
+    return None
+
+
 async def _scrape_dashboard(workspace_id: str, auth_cookie: str) -> float | None:
     """Scrape billing page for Zen balance using Go's auth cookie."""
     if not workspace_id or not auth_cookie:
@@ -168,28 +197,10 @@ async def _scrape_dashboard(workspace_id: str, auth_cookie: str) -> float | None
         if resp.status_code >= 400:
             _debug(f"billing page HTTP {resp.status_code}")
             return None
-        # Look for balance patterns in SSR HTML
-        patterns = [
-            # Keep the fractional component: a JSON value such as
-            # "balance": 9.21 must not be reported as $9.00.
-            r'balance["\']?\s*:\s*["\']?(\d+(?:\.\d+)?)',
-            r'\$?(\d+\.\d{2})\s*balance',
-            r'"balanceValue"[^>]*>\$?(\d+\.\d{2})',
-            r'formatBalance\((\d+)\)',
-            r'\$?(\d+\.\d{2})\s*remaining',
-        ]
-        for pat in patterns:
-            for m in re.finditer(pat, resp.text, re.IGNORECASE):
-                try:
-                    val = float(m.group(1))
-                    if val > 0:
-                        # Raw satoshi value (divided by 1e8 in formatBalance)
-                        if val > 1e6:
-                            val = val / 1e8
-                        _debug(f"found balance: {val}")
-                        return val
-                except (ValueError, IndexError):
-                    continue
+        balance = _extract_balance(resp.text)
+        if balance is not None:
+            _debug(f"found balance: {balance}")
+            return balance
         _debug("no balance pattern found in billing page")
         return None
     except httpx.HTTPError as e:
