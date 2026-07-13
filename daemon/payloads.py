@@ -560,16 +560,20 @@ def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict
                 "remainsTime",
             ))
             end = as_number(value(item, f"{window}_end_time", f"{window}EndTime", "end_time", "endTime"))
+        # The API's explicit reset epoch is authoritative. ``remains_time``
+        # is only a fallback; it can lag behind the live rolling five-hour
+        # window after a quota refresh.
+        if end is not None:
+            if end > 10_000_000_000:
+                end /= 1000
+            if end > current_time:
+                return int(round((end - current_time) / 60))
+
         if seconds is not None and seconds > 0:
             # Some older responses encode duration in milliseconds.
             if seconds > 864_000:
                 seconds /= 1000
             return int(round(seconds / 60))
-
-        if end is not None:
-            if end > 10_000_000_000:
-                end /= 1000
-            return max(0, int(round((end - current_time) / 60)))
         return 0
 
     if isinstance(models, list):
@@ -577,17 +581,29 @@ def build_minimax_usage_payload(data: dict, *, now: float | None = None) -> dict
         if candidates:
             # Prefer text/chat entries over separate image, video, speech, or
             # music quotas so the monitor follows the Coding Plan people use.
+            def is_non_text_service(item: dict) -> bool:
+                name = str(value(item, "model_name", "modelName", "service_type", "serviceType") or "").lower()
+                return any(token in name for token in ("image", "video", "speech", "music", "audio"))
+
+            text_candidates = [item for item in candidates if not is_non_text_service(item)]
+            # A MiniMax response can list a separate video quota with a real
+            # count while the text/general plan exposes percentage-only quota.
+            # Choose the text/general lane first; otherwise the video reset
+            # (often 12 or 24 hours) is incorrectly shown as the 5-hour card.
+            if text_candidates:
+                candidates = text_candidates
+
             def chat_score(item: dict) -> int:
                 name = str(value(item, "model_name", "modelName", "service_type", "serviceType") or "").lower()
                 score = 0
                 if name.startswith("minimax-m"):
                     score += 1_000
+                elif name in ("general", "text", "text-generation"):
+                    score += 500
                 elif "minimax" in name:
                     score += 10
                 if any(token in name for token in ("m3", "m2", "text", "chat", "coding")):
                     score += 100
-                if any(token in name for token in ("image", "video", "speech", "music", "audio")):
-                    score -= 1000
                 interval_total = as_number(value(item, "current_interval_total_count", "currentIntervalTotalCount"))
                 weekly_total = as_number(value(item, "current_weekly_total_count", "currentWeeklyTotalCount"))
                 if interval_total is not None and interval_total > 0:

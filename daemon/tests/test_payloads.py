@@ -249,3 +249,58 @@ def test_minimax_count_fields_override_rounded_remaining_percent() -> None:
     assert payload["top"]["pct"] == 73
     assert payload["bottom"]["pct"] == 54
     assert payload["bottom"]["reset_mins"] == 10080
+
+
+def test_minimax_prefers_future_reset_epoch_over_stale_remains_time() -> None:
+    """The live five-hour reset epoch wins when duration data lags behind."""
+    now = 1_700_000_000
+    payload = build_minimax_usage_payload(
+        {
+            "data": {
+                "model_remains": [{
+                    "model_name": "MiniMax-M3",
+                    "current_interval_total_count": 100,
+                    "current_interval_usage_count": 70,
+                    "remains_time": 1_800,
+                    "end_time": now + 5 * 60 * 60,
+                    "current_weekly_total_count": 1000,
+                    "current_weekly_usage_count": 400,
+                    "weekly_remains_time": 3 * 24 * 60 * 60,
+                }]
+            }
+        },
+        now=now,
+    )
+
+    assert payload["top"]["reset_mins"] == 300
+
+
+def test_minimax_uses_general_text_lane_instead_of_video_reset() -> None:
+    """A real video quota must not replace the general five-hour plan window."""
+    now = 1_700_000_000
+    payload = build_minimax_usage_payload(
+        {
+            "model_remains": [
+                {
+                    "model_name": "general",
+                    "current_interval_remaining_percent": 98,
+                    "end_time": (now + 5 * 60 * 60) * 1000,
+                    "current_weekly_remaining_percent": 95,
+                    "weekly_end_time": (now + 7 * 24 * 60 * 60) * 1000,
+                },
+                {
+                    "model_name": "video",
+                    "current_interval_total_count": 3,
+                    "current_interval_usage_count": 0,
+                    "end_time": (now + 12 * 60 * 60) * 1000,
+                    "current_weekly_total_count": 21,
+                    "current_weekly_usage_count": 0,
+                },
+            ]
+        },
+        now=now,
+    )
+
+    assert payload["top"]["pct"] == 98
+    assert payload["top"]["reset_mins"] == 300
+    assert payload["bottom"]["pct"] == 95
