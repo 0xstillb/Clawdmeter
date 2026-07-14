@@ -150,6 +150,20 @@ def test_go_weekly_monthly_payload_is_not_flattened_for_wire():
     assert wire["bottom"]["label"] == "Monthly"
 
 
+def test_brightness_override_is_sent_with_compact_payload(tmp_path, monkeypatch):
+    import daemon.claude_usage_daemon_windows as mod
+
+    brightness_file = tmp_path / "brightness"
+    brightness_file.write_text("75\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "_BRIGHTNESS_FILE", brightness_file)
+    monkeypatch.delenv("BRIGHTNESS_PCT", raising=False)
+
+    payload = {"s": 60, "sr": 30, "w": 40, "wr": 60, "st": "allowed", "ok": True}
+    wire = mod._payload_for_wire(mod._apply_brightness_override(payload))
+
+    assert wire["brightness"] == 75
+
+
 def test_select_usage_source_prefers_codex(monkeypatch):
     import daemon.claude_usage_daemon_windows as mod
 

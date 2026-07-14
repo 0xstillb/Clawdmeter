@@ -40,6 +40,7 @@ def build_harness() -> Path:
         "invalid_payload",
         "zen_prepaid",
         "codex_weekly_only",
+        "brightness_field",
     ],
 )
 def test_usage_payload_harness_scenarios(scenario: str) -> None:

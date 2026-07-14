@@ -38,6 +38,11 @@ void splash_show_hint(bool show);
 void splash_notify_pet_changed(void);
 lv_obj_t* splash_get_root(void);
 
+// Temporarily lend the large no-PSRAM canvas buffer to a synchronous network
+// request. The main loop must restore it before calling LVGL again.
+bool splash_release_buffer_for_network(void);
+bool splash_restore_buffer_after_network(void);
+
 // Mini animated creature for embedding elsewhere (e.g. the idle screen).
 // Renders the named claudepix animation (e.g. "expression sleep") at ~px×px
 // inside `parent`; returns the canvas object (position it with lv_obj_align) or

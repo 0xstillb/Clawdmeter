@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """DeepSeek provider plugin for Clawdmeter.
 
-DeepSeek is an API-only prepaid provider. It reports total balance plus paid
-and granted credit; it does not expose time-window quota data.
+DeepSeek is an API-only prepaid provider. It shows total used and remaining
+credit in the same prepaid layout as OpenCode Zen. The first observed balance
+fills the remaining bar; it then drains as credit is spent.
 
 Fetches ``GET /user/balance`` directly.
 
 UI Layout:
-  - Top card: Paid and granted credit breakdown
-  - Bottom card: Total balance remaining
+  - Top card: Used credit since the bar's current baseline
+  - Bottom card: Remaining balance
 
 Credentials (checked in order):
   1. DEEPSEEK_API_KEY or DEEPSEEK_KEY env var
@@ -24,6 +25,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 # Add repo root so imports work when run standalone
@@ -42,6 +44,7 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 _USER_AGENT = "clawdmeter/1.0"
 _TIMEOUT = 20.0
 _STATE_DIR = Path.home() / ".config" / "clawdmeter"
+_STATE_FILE = _STATE_DIR / "deepseek-state.json"
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -54,7 +57,7 @@ def _debug(*args: object) -> None:
 
 
 def _read_credentials() -> dict | None:
-    """Return the API key from environment or tray settings."""
+    """Return the API key from environment or saved settings."""
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip() or os.environ.get("DEEPSEEK_KEY", "").strip()
 
     if api_key:
@@ -83,6 +86,59 @@ def _is_auth_failure(msg: str | None) -> bool:
         return False
     lowered = msg.lower()
     return "api key" in lowered or "not configured" in lowered or "401" in msg or "403" in msg
+
+
+def _read_state() -> dict | None:
+    try:
+        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_state(state: dict) -> None:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _minutes_until_midnight() -> int:
+    import datetime as dt
+    now = dt.datetime.now()
+    tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    return int((tomorrow - now).total_seconds() / 60)
+
+
+def _compute_balance_progress(current_balance: float) -> dict:
+    """Keep a high-water balance so Remaining starts full and drains smoothly."""
+    today = str(date.today())
+    state = _read_state()
+    try:
+        baseline = float(state.get("bar_baseline", current_balance)) if state else current_balance
+    except (TypeError, ValueError):
+        baseline = current_balance
+    # A top-up becomes the new full bar. Do not shrink its scale while spending.
+    baseline = max(baseline, current_balance)
+
+    if state is None or state.get("date") != today:
+        _write_state({
+            "date": today,
+            "start_balance": current_balance,
+            "bar_baseline": baseline,
+        })
+        return {"spent": max(0.0, baseline - current_balance), "baseline": baseline,
+                "reset_mins": _minutes_until_midnight()}
+
+    try:
+        start_balance = float(state.get("start_balance", current_balance))
+    except (TypeError, ValueError):
+        start_balance = current_balance
+    _write_state({
+        "date": today,
+        "start_balance": start_balance,
+        "last_balance": current_balance,
+        "bar_baseline": baseline,
+    })
+    return {"spent": max(0.0, baseline - current_balance), "baseline": baseline,
+            "reset_mins": _minutes_until_midnight()}
 
 
 # ── main poll logic ─────────────────────────────────────────────────────────
@@ -167,7 +223,23 @@ async def poll() -> PluginResponse:
         )
 
     # ── build and return payload ───────────────────────────────────────
-    payload = build_deepseek_usage_payload(body)
+    balances = [item for item in infos if isinstance(item, dict)]
+    ledger = next(
+        (item for item in balances if str(item.get("currency", "")).upper() == "USD"),
+        balances[0],
+    )
+    try:
+        balance = max(0.0, float(ledger.get("total_balance", 0) or 0))
+    except (TypeError, ValueError):
+        balance = 0.0
+    progress = _compute_balance_progress(balance)
+
+    payload = build_deepseek_usage_payload(
+        body,
+        total_budget=progress["baseline"],
+        total_spent=progress["spent"],
+        daily_reset_mins=progress["reset_mins"],
+    )
     return PluginResponse.success(payload)
 
 

@@ -197,6 +197,7 @@ static const uint8_t SINE_48[48] = {
 static screen_t current_screen = SCREEN_USAGE;
 static uint32_t s_last_screen_change = 0;
 static bool s_ble_connected = false;
+static wifi_fallback_state_t s_wifi_state = WIFI_FALLBACK_NOT_CONFIGURED;
 static bool data_received = false;
 static int view_state = -1;  // 0 pair, 1 idle, 2 usage
 static int forced_view_override = -1;
@@ -845,7 +846,7 @@ static void format_panel_heading(const UsagePanelData* panel, bool top, char* bu
     if (strcmp(panel->kind, "window_short") == 0) {
         snprintf(buf, buf_size, "Current window");
     } else if (strcmp(panel->kind, "window_long") == 0) {
-        snprintf(buf, buf_size, "Weekly cap");
+        snprintf(buf, buf_size, "%s", strcmp(panel->label, "Monthly") == 0 ? "Monthly cap" : "Weekly cap");
     } else if (strcmp(panel->kind, "budget_daily") == 0) {
         snprintf(buf, buf_size, "Daily budget");
     } else if (strcmp(panel->kind, "wallet_depletion") == 0) {
@@ -866,11 +867,11 @@ static void format_panel_meta_left(const UsagePanelData* panel, bool top, char* 
     if (L.mode == LAYOUT_LANDSCAPE_SMALL && strcmp(panel->kind, "window_short") == 0) {
         snprintf(buf, buf_size, "now_left");
     } else if (L.mode == LAYOUT_LANDSCAPE_SMALL && strcmp(panel->kind, "window_long") == 0) {
-        snprintf(buf, buf_size, "week_left");
+        snprintf(buf, buf_size, "%s", strcmp(panel->label, "Monthly") == 0 ? "monthly_left" : "week_left");
     } else if (strcmp(panel->kind, "window_short") == 0) {
         snprintf(buf, buf_size, "window left");
     } else if (strcmp(panel->kind, "window_long") == 0) {
-        snprintf(buf, buf_size, "week left");
+        snprintf(buf, buf_size, "%s", strcmp(panel->label, "Monthly") == 0 ? "monthly left" : "week left");
     } else if (strcmp(panel->kind, "budget_daily") == 0) {
         snprintf(buf, buf_size, "day left");
     } else if (strcmp(panel->kind, "wallet_depletion") == 0) {
@@ -1130,9 +1131,13 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     // ── bar: remaining % for wallet_depletion, spent% for budget_daily ──
     int bar_pct = pct;
     // Prepaid raw-dollar cards: scale bar relative to configured budget
-    if (prepaid_card && pct > 0) {
+    if (prepaid_card && panel->pct > 0.0f) {
         float budget = current_usage.budget > 0 ? current_usage.budget : 20.0f;
-        bar_pct = pct >= budget ? 100 : (int)((pct / budget) * 100.0f);
+        // Keep the raw amount here. Rounding to whole currency units made a
+        // low-balance wallet appear frozen until it crossed the next dollar.
+        bar_pct = panel->pct >= budget
+            ? 100
+            : (int)((panel->pct / budget) * 100.0f + 0.5f);
         if (bar_pct > 100) bar_pct = 100;
     }
 
@@ -1154,6 +1159,26 @@ static void set_usage_panel(PanelWidgets* widgets, const UsagePanelData* panel, 
     }
     lv_label_set_text(widgets->meta_left, meta_left);
     lv_label_set_text(widgets->meta_right, meta_right);
+}
+
+static void render_wifi_icon(wifi_fallback_state_t state) {
+    const uint16_t bg = make_rgb565(0x05, 0x06, 0x08);
+    const uint16_t color = state == WIFI_FALLBACK_CONNECTED
+        ? make_rgb565(0x34, 0xb5, 0x5a)
+        : state == WIFI_FALLBACK_ERROR
+            ? make_rgb565(0xff, 0x6b, 0x57)
+            : make_rgb565(0xff, 0xaa, 0x4d);
+    for (int i = 0; i < 14 * 16; ++i) ble_canvas_buf[i] = bg;
+
+    // Compact 14x16 Wi-Fi glyph: two signal chevrons plus the station dot.
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 1, 5, 4, 2, color, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 4, 2, 7, 1, color, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 7, 1, 10, 2, color, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 10, 2, 13, 5, color, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 4, 8, 7, 6, color, 1);
+    draw_line_thick_565(ble_canvas_buf, 14, 16, 7, 6, 10, 8, color, 1);
+    draw_rect_565(ble_canvas_buf, 14, 16, 6, 12, 3, 3, color);
+    if (lbl_ble) lv_obj_invalidate(lbl_ble);
 }
 
 static void set_single_weekly_limit_layout(bool enabled) {
@@ -1310,7 +1335,16 @@ static void update_header_provider(void) {
 }
 
 static void update_header_connection_state(void) {
-    const bool connected = s_ble_connected;
+    const bool wifi_connected = s_wifi_state == WIFI_FALLBACK_CONNECTED;
+    const bool connected = s_ble_connected || wifi_connected;
+    const bool wifi_is_active = s_wifi_state == WIFI_FALLBACK_CONNECTING
+        || s_wifi_state == WIFI_FALLBACK_CONNECTED
+        || s_wifi_state == WIFI_FALLBACK_ERROR;
+    // A bonded Windows HID link can remain connected after the daemon stops.
+    // Prefer the Wi-Fi glyph whenever fallback is actively trying/working so
+    // the icon describes the data path, not merely the radio link.
+    if (wifi_is_active) render_wifi_icon(s_wifi_state);
+    else render_ble_icon();
     lv_obj_set_style_border_color(brand_chip, COL_BLUE, 0);
     lv_obj_set_style_text_color(brand_chip_label, connected ? COL_TEXT : COL_DIM, 0);
     lv_obj_set_style_opa(lbl_ble, connected ? (lv_opa_t)179 : LV_OPA_COVER, 0);
@@ -1330,7 +1364,13 @@ static void update_header_connection_state(void) {
 static void update_header_title_for_view(int view) {
     if (!lbl_title) return;
     if (view == 0) {
-        lv_label_set_text(lbl_title, "Pairing");
+        if (!s_ble_connected && s_wifi_state == WIFI_FALLBACK_CONNECTING) {
+            lv_label_set_text(lbl_title, "Wi-Fi...");
+        } else if (!s_ble_connected && s_wifi_state == WIFI_FALLBACK_ERROR) {
+            lv_label_set_text(lbl_title, "Wi-Fi error");
+        } else {
+            lv_label_set_text(lbl_title, "Pairing");
+        }
     } else if (view == 1) {
         lv_label_set_text(lbl_title, "Standing by");
     } else {
@@ -1383,8 +1423,10 @@ static void apply_view_state(int view) {
 static void update_view_state(void) {
     if (current_screen != SCREEN_USAGE) return;
     const uint32_t now = lv_tick_get();
+    const bool wifi_connected = s_wifi_state == WIFI_FALLBACK_CONNECTED;
+    const bool transport_connected = s_ble_connected || wifi_connected;
     int next = 0;
-    if (!s_ble_connected) {
+    if (!transport_connected) {
         next = 0;  // Pair
     } else if (data_received && (now - last_data_ms) < DATA_FRESH_MS) {
         next = 2;  // Usage — data is fresh
@@ -1392,7 +1434,7 @@ static void update_view_state(void) {
         next = 1;  // Idle — data stale or never received
     }
 
-    if (!s_ble_connected) {
+    if (!transport_connected) {
         forced_view_override = -1;
     } else if (forced_view_override >= 0) {
         next = forced_view_override;
@@ -1434,6 +1476,13 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_shadow_opa(usage_bg_glow, (lv_opa_t)12, 0);
     lv_obj_clear_flag(usage_bg_glow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_move_background(usage_bg_glow);
+    // On the 320x240 landscape target, composing this large translucent
+    // shadow underneath the translucent header can exhaust LVGL's software
+    // draw workspace and lock the partial renderer after its first strip.
+    // It is purely decorative; the cards retain their smaller accent shadows.
+    if (L.mode == LAYOUT_LANDSCAPE_SMALL) {
+        lv_obj_add_flag(usage_bg_glow, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // build_screen_grid(usage_container);  // removed
 
@@ -1590,13 +1639,6 @@ void ui_update(const UsageData* data) {
     set_single_weekly_limit_layout(single_weekly_limit);
     set_usage_panel(&panel_top, &data->top, true);
     set_usage_panel(&panel_bottom, &data->bottom, false);
-
-    // Auto-return from splash when BLE data comes back
-    // (skip if user-selected petdex is shown — keep full-screen pet)
-    if (current_screen == SCREEN_SPLASH && data->valid && !pet_buffer_ready()) {
-        ui_show_screen(SCREEN_USAGE);
-        return;
-    }
 
     update_view_state();
 }
@@ -1767,6 +1809,19 @@ int ui_get_view_state(void) {
     return view_state;
 }
 
+bool ui_has_usage_data(void) {
+    return data_received;
+}
+
+uint32_t ui_get_usage_data_age_ms(void) {
+    if (!data_received) return UINT32_MAX;
+    return lv_tick_get() - last_data_ms;
+}
+
+int ui_get_forced_view(void) {
+    return forced_view_override;
+}
+
 uint32_t ui_get_last_screen_change_time(void) {
     return s_last_screen_change;
 }
@@ -1781,12 +1836,24 @@ bool ui_is_ble_connected(void) {
     return s_ble_connected;
 }
 
+bool ui_has_active_transport(void) {
+    return s_ble_connected || s_wifi_state == WIFI_FALLBACK_CONNECTED;
+}
+
 
 void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) {
     (void)name;
     (void)mac;
     s_ble_connected = (state == BLE_STATE_CONNECTED);
     if (!s_ble_connected) forced_view_override = -1;
+    update_view_state();
+}
+
+void ui_update_wifi_status(wifi_fallback_state_t state) {
+    if (s_wifi_state == state) return;
+    s_wifi_state = state;
+    update_header_connection_state();
+    update_header_title_for_view(view_state);
     update_view_state();
 }
 

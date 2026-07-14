@@ -219,12 +219,17 @@ def build_opencode_go_payload(parsed: dict, *, now: float | None = None) -> dict
     )
 
 
-def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None) -> dict:
+def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None,
+                                 total_budget: float | None = None,
+                                 total_spent: float | None = None,
+                                 daily_reset_mins: int = 1440) -> dict:
     """Build a BLE payload from DeepSeek's API-only balance response.
 
-    DeepSeek exposes no daily, session, or weekly quota windows. Its balance
-    endpoint reports total, paid (topped-up), and granted credit, so the two
-    cards show that exact breakdown instead of derived daily spend.
+    DeepSeek exposes no daily, session, or weekly quota windows.  Like Zen,
+    it is presented as a prepaid wallet: total used on the top card and
+    remaining balance on the bottom card.  ``total_budget`` is optional; when
+    configured it lets the daemon calculate total used accurately.  Without
+    one, the top card shows usage since the start of the current day.
 
     ``balance_data`` shape from ``GET /user/balance``::
 
@@ -256,12 +261,11 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
             return 0.0
 
     total_balance = amount("total_balance")
-    paid_balance = amount("topped_up_balance")
-    granted_balance = amount("granted_balance")
-    if granted_balance == 0 and total_balance > paid_balance:
-        granted_balance = total_balance - paid_balance
+    if total_budget is not None and total_budget > 0:
+        used_amount = max(0.0, total_budget - total_balance)
+    else:
+        used_amount = max(0.0, total_spent or 0.0)
 
-    paid_detail = f"{currency} {paid_balance:.2f} + G {granted_balance:.2f}"
     if total_balance <= 0:
         balance_detail = "Add credits"
     elif not is_available:
@@ -269,20 +273,20 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
     else:
         balance_detail = f"{currency} {total_balance:.2f}"
 
-    return build_provider_payload(
+    payload = build_provider_payload(
         provider="deepseek",
         mode="prepaid",
         plan_type="prepaid",
         top={
-            "label": "Paid + Grant",
+            "label": "Used",
             "kind": "budget_daily",
-            "pct": paid_balance + granted_balance,
-            "reset_mins": 0,
-            "has_reset": False,
-            "subtext": paid_detail,
+            "pct": round(used_amount, 2),
+            "reset_mins": daily_reset_mins,
+            "has_reset": daily_reset_mins > 0,
+            "subtext": f"{currency} {used_amount:.2f}",
         },
         bottom={
-            "label": "Balance",
+            "label": "Remaining",
             "kind": "wallet_depletion",
             "pct": total_balance,
             "reset_mins": 0,
@@ -291,8 +295,11 @@ def build_deepseek_usage_payload(balance_data: dict, *, now: float | None = None
         },
         status="allowed" if is_available and total_balance > 0 else "limited",
         ok=is_available,
-        legacy_aliases={"s": total_balance, "sr": 0, "w": paid_balance + granted_balance, "wr": 0},
+        legacy_aliases={"s": total_balance, "sr": 0, "w": used_amount, "wr": 0},
     )
+    if total_budget is not None and total_budget > 0:
+        payload["budget"] = round(total_budget, 2)
+    return payload
 
 
 def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
@@ -302,15 +309,15 @@ def _build_deepseek_fallback_payload(now: float | None = None) -> dict:
         mode="prepaid",
         plan_type="prepaid",
         top={
-            "label": "Paid + Grant",
+            "label": "Used",
             "kind": "budget_daily",
             "pct": 0,
-            "reset_mins": 0,
-            "has_reset": False,
+            "reset_mins": 1440,
+            "has_reset": True,
             "subtext": "unavailable",
         },
         bottom={
-            "label": "Balance",
+            "label": "Remaining",
             "kind": "wallet_depletion",
             "pct": 0,
             "reset_mins": 0,

@@ -22,8 +22,14 @@ import pytest
 
 from daemon.tray_windows import (
     TrayState,
+    _automatic_wifi_provider,
+    _selected_wifi_provider,
     header_text,
+    wifi_runtime_label,
     _acquire_single_instance,
+    _clear_brightness_pct,
+    _read_brightness_pct,
+    _write_brightness_pct,
     _ERROR_ALREADY_EXISTS,
     _minimax_credentials,
     _save_minimax_credentials,
@@ -42,6 +48,61 @@ def test_tray_state_initial():
     assert ts.last_sync is None
     assert ts.loop is None
     assert ts.stop_event is None
+    assert ts.wifi_notice_seq == 0
+    assert ts.wifi_settings_seq == 0
+    assert ts.wifi_runtime_status == "unknown"
+    assert ts.wifi_runtime_seen_at is None
+
+
+def test_wifi_connected_increments_tray_notification_sequence():
+    ts = TrayState()
+
+    ts.note_wifi_status("connected")
+    first_seen = ts.wifi_runtime_seen_at
+    ts.note_wifi_status("connected")
+    ts.note_wifi_status("ignored")
+
+    assert ts.wifi_notice_seq == 1
+    assert ts.wifi_runtime_status == "connected"
+    assert ts.wifi_runtime_seen_at is not None
+    assert ts.wifi_runtime_seen_at >= first_seen
+
+
+def test_wifi_settings_change_increments_menu_refresh_sequence():
+    ts = TrayState()
+
+    ts.note_wifi_settings_changed()
+
+    assert ts.wifi_settings_seq == 1
+
+
+def test_wifi_configured_status_marks_cyd_as_confirmed():
+    ts = TrayState()
+
+    ts.note_wifi_status("configured")
+
+    assert ts.wifi_configured_on_cyd is True
+    assert ts.wifi_settings_seq == 1
+
+
+def test_wifi_runtime_status_updates_menu_state_without_toast():
+    ts = TrayState()
+
+    ts.note_wifi_status("connecting")
+    ts.note_wifi_status("error")
+
+    assert ts.wifi_runtime_status == "error"
+    assert ts.wifi_notice_seq == 0
+    assert ts.wifi_settings_seq == 2
+
+
+def test_wifi_runtime_label_marks_status_as_last_reported(monkeypatch):
+    ts = TrayState()
+    ts.wifi_runtime_status = "connected"
+    ts.wifi_runtime_seen_at = 1000.0
+    monkeypatch.setattr(time, "strftime", lambda *_args: "13:45")
+
+    assert wifi_runtime_label(ts) == "Wi-Fi status: Connected · last reported 13:45"
 
 
 def test_set_connected():
@@ -120,6 +181,81 @@ def test_minimax_credentials_round_trip(tmp_path):
     saved = (tmp_path / "minimax-credentials.json").read_text(encoding="utf-8")
     assert '"api_key": "minimax-api-key"' in saved
     assert "group_id" not in saved
+
+
+def test_brightness_setting_round_trip(tmp_path, monkeypatch):
+    import daemon.tray_windows as mod
+
+    monkeypatch.setattr(mod, "_BRIGHTNESS_FILE", tmp_path / "brightness")
+    assert _read_brightness_pct() is None
+
+    _write_brightness_pct(75)
+    assert _read_brightness_pct() == 75
+
+    _clear_brightness_pct()
+    assert _read_brightness_pct() is None
+
+
+def test_wifi_fallback_uses_active_direct_provider(monkeypatch):
+    import daemon.config as config_mod
+    import daemon.tray_windows as tray_mod
+
+    monkeypatch.setattr(config_mod, "provider_preference", lambda: "minimax")
+    monkeypatch.setattr(tray_mod, "_direct_provider_api_key",
+                        lambda provider: "minimax-key" if provider == "minimax" else "")
+
+    selected, message = _automatic_wifi_provider()
+
+    assert selected == {"provider": "minimax", "api_key": "minimax-key"}
+    assert message == "Will use active provider: Minimax"
+
+
+def test_wifi_fallback_finds_saved_direct_provider_when_active_is_not_direct(monkeypatch):
+    import daemon.config as config_mod
+    import daemon.tray_windows as tray_mod
+
+    monkeypatch.setattr(config_mod, "provider_preference", lambda: "claude")
+    monkeypatch.setattr(tray_mod, "_direct_provider_api_key",
+                        lambda provider: "router-key" if provider == "openrouter" else "")
+
+    selected, message = _automatic_wifi_provider()
+
+    assert selected == {"provider": "openrouter", "api_key": "router-key"}
+    assert message == "Will use saved API provider: OpenRouter"
+
+
+def test_wifi_fallback_can_select_explicit_provider(monkeypatch):
+    import daemon.tray_windows as tray_mod
+
+    monkeypatch.setattr(tray_mod, "_direct_provider_api_key",
+                        lambda provider: "deepseek-key" if provider == "deepseek" else "")
+
+    selected, message = _selected_wifi_provider("deepseek")
+
+    assert selected == {"provider": "deepseek", "api_key": "deepseek-key"}
+    assert message == "Wi-Fi fallback provider: DeepSeek"
+
+
+def test_wifi_fallback_explicit_provider_requires_saved_key(monkeypatch):
+    import daemon.tray_windows as tray_mod
+
+    monkeypatch.setattr(tray_mod, "_direct_provider_api_key", lambda _provider: "")
+
+    selected, message = _selected_wifi_provider("openrouter")
+
+    assert selected is None
+    assert message == "Add an OpenRouter API key in Accounts & API keys first."
+
+
+def test_wifi_ssid_parser_reads_current_windows_network(monkeypatch):
+    import daemon.tray_windows as tray_mod
+
+    class Result:
+        stdout = "\n    SSID                   : Desk Wi-Fi\n    BSSID                  : 00:11:22:33:44:55\n"
+
+    monkeypatch.setattr(tray_mod.subprocess, "run", lambda *args, **kwargs: Result())
+
+    assert tray_mod._current_wifi_ssid() == "Desk Wi-Fi"
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,11 @@ bool ble_has_data(void);
 const char* ble_get_data(void);
 void ble_send_ack(void);
 void ble_send_nack(void);
+void ble_send_wifi_config_result(void);
+void ble_send_wifi_status(const char* status);
+void ble_publish_wifi_runtime_state(const char* status);
+bool ble_pause_for_wifi_request(void);
+bool ble_resume_after_wifi_request(void);
 void ble_request_refresh(void);
 void ble_send_screen(const char* screen_name);
 

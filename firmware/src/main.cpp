@@ -13,6 +13,7 @@
 #include "idle_cfg.h"
 #include "brightness.h"
 #include "pet_buffer.h"
+#include "wifi_fallback.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -22,11 +23,21 @@
 #include "hal/imu_hal.h"
 
 static UsageData usage = {};
+static uint32_t loop_count = 0;
+static uint32_t ble_rx_count = 0;
+static uint32_t ble_parse_ok_count = 0;
+static uint32_t ble_parse_fail_count = 0;
+static uint32_t last_ble_rx_ms = 0;
+static uint32_t last_ble_apply_ms = 0;
 
 static bool     touch_down = false;
 static bool     touch_released = false;
 static uint32_t touch_down_ms = 0;
 static uint32_t touch_release_held_ms = 0;
+static bool     touch_raw_pressed = false;
+static uint16_t touch_last_x = 0;
+static uint16_t touch_last_y = 0;
+static uint32_t touch_edge_count = 0;
 
 static void note_touch_sample(bool pressed) {
     const uint32_t now = millis();
@@ -47,10 +58,14 @@ static void note_touch_sample(bool pressed) {
 // boards (e.g. ESP32-C6) allocate from internal SRAM, so we shrink the strip
 // — 480×20 RGB565 = 19 KB × 2 buffers = 38 KB, fits beside everything else.
 #ifdef BOARD_HAS_PSRAM
-#define BUF_LINES 40
+#ifndef LV_DRAW_BUF_LINES
+#define LV_DRAW_BUF_LINES 40
+#endif
 #define LV_BUF_CAPS (MALLOC_CAP_SPIRAM)
 #else
-#define BUF_LINES 20
+#ifndef LV_DRAW_BUF_LINES
+#define LV_DRAW_BUF_LINES 20
+#endif
 #define LV_BUF_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 #endif
 static uint16_t* buf1 = nullptr;
@@ -97,6 +112,12 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     bool pressed;
     touch_hal_read(&x, &y, &pressed);
     const bool raw_pressed = pressed;
+    if (raw_pressed != touch_raw_pressed) touch_edge_count++;
+    touch_raw_pressed = raw_pressed;
+    if (raw_pressed) {
+        touch_last_x = x;
+        touch_last_y = y;
+    }
 
     if (IDLE_WAKE_ON_TOUCH) {
         static bool touch_was = false;
@@ -135,7 +156,7 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+#define CMD_BUF_SIZE 256
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
@@ -204,6 +225,41 @@ static void check_serial_cmd() {
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            else if (strcmp(cmd_buf, "ble clear") == 0) {
+                ble_clear_bonds();
+                Serial.println("BLE bonds cleared; ready to pair");
+            } else if (strcmp(cmd_buf, "ui status") == 0) {
+                const uint32_t age = ui_get_usage_data_age_ms();
+                Serial.printf(
+                    "UI status: loop=%lu screen=%s view=%d forced=%d ble=%d wifi=%s data=%d age_ms=%s "
+                    "rx=%lu parsed=%lu failed=%lu rx_age_ms=%s apply_age_ms=%s "
+                    "touch=%d raw=%d xy=%u,%u edges=%lu\n",
+                    (unsigned long)loop_count,
+                    ui_get_current_screen() == SCREEN_SPLASH ? "splash" : "usage",
+                    ui_get_view_state(), ui_get_forced_view(),
+                    ble_get_state() == BLE_STATE_CONNECTED ? 1 : 0,
+                    wifi_fallback_state_name(wifi_fallback_get_state()),
+                    ui_has_usage_data() ? 1 : 0,
+                    age == UINT32_MAX ? "never" : String(age).c_str(),
+                    (unsigned long)ble_rx_count,
+                    (unsigned long)ble_parse_ok_count,
+                    (unsigned long)ble_parse_fail_count,
+                    last_ble_rx_ms == 0 ? "never" : String(millis() - last_ble_rx_ms).c_str(),
+                    last_ble_apply_ms == 0 ? "never" : String(millis() - last_ble_apply_ms).c_str(),
+                    touch_down ? 1 : 0, touch_raw_pressed ? 1 : 0,
+                    (unsigned)touch_last_x, (unsigned)touch_last_y,
+                    (unsigned long)touch_edge_count);
+            } else if (strcmp(cmd_buf, "ui usage") == 0) {
+                ui_show_screen(SCREEN_USAGE);
+                ui_force_view(2);
+                Serial.println("UI command: usage");
+            } else if (strcmp(cmd_buf, "ui splash") == 0) {
+                ui_show_screen(SCREEN_SPLASH);
+                Serial.println("UI command: splash");
+            } else if (strcmp(cmd_buf, "ui next") == 0) {
+                ui_toggle_splash();
+                Serial.println("UI command: next");
+            } else wifi_fallback_handle_serial_command(cmd_buf);
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -240,13 +296,13 @@ void setup() {
     lv_init();
     lv_tick_set_cb(my_tick);
 
-    buf1 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
-    buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
+    buf1 = (uint16_t*)heap_caps_malloc(W * LV_DRAW_BUF_LINES * 2, LV_BUF_CAPS);
+    buf2 = (uint16_t*)heap_caps_malloc(W * LV_DRAW_BUF_LINES * 2, LV_BUF_CAPS);
 
     lv_display_t* disp = lv_display_create(W, H);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, my_flush_cb);
-    lv_display_set_buffers(disp, buf1, buf2, W * BUF_LINES * 2,
+    lv_display_set_buffers(disp, buf1, buf2, W * LV_DRAW_BUF_LINES * 2,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
@@ -255,6 +311,7 @@ void setup() {
     lv_indev_set_read_cb(indev, my_touch_cb);
 
     ble_init();
+    wifi_fallback_init();
     input_hal_init();
 
     ui_init();
@@ -262,6 +319,7 @@ void setup() {
         Serial.println("pet_buffer: alloc failed — pets disabled");
     }
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
+    ui_update_wifi_status(wifi_fallback_get_state());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
     ui_show_screen(SCREEN_SPLASH);
 
@@ -270,6 +328,27 @@ void setup() {
 }
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
+
+static void apply_usage_snapshot(const UsageData& next) {
+    usage = next;
+    int g_before = usage_rate_group();
+    float rate_pct = usage.top.pct;
+    if (strcmp(usage.plan_type, "prepaid") == 0) {
+        // Prepaid: animation follows remaining balance level.
+        splash_set_prepaid_balance((int)usage.bottom.pct);
+    } else {
+        // Subscription: top.pct is remaining % — invert to get used %.
+        rate_pct = 100.0f - rate_pct;
+        usage_rate_sample(rate_pct);
+        int g_after = usage_rate_group();
+        if (g_after != g_before) {
+            Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                g_before, g_after, usage.top.pct);
+            if (splash_is_active() && !pet_buffer_ready()) splash_pick_for_current_rate();
+        }
+    }
+    ui_update(&usage);
+}
 
 // Hold-to-pair gesture: hold the PWR button ~3s, then RELEASE → clear all BLE
 // bonds and re-advertise. Clearing on *release* (not while held) is deliberate:
@@ -390,7 +469,7 @@ static void touch_ux_tick(void) {
                 if (touch_down_ms > ui_get_last_screen_change_time()) {
                     ui_show_screen(SCREEN_USAGE);
                     NAV_COOLDOWN();
-                    if (ui_is_ble_connected()) {
+                    if (ui_has_active_transport()) {
                         ui_force_view(2);
                     }
                 }
@@ -400,7 +479,7 @@ static void touch_ux_tick(void) {
                 // usage_container, so global_click_cb won't fire for taps on
                 // the creature. Handle via raw touch state instead.
                 if (touch_down_ms > ui_get_last_screen_change_time()) {
-                    if (ui_is_ble_connected()) {
+                    if (ui_has_active_transport()) {
                         ui_force_view(2);
                     } else {
                         ui_show_screen(SCREEN_SPLASH);
@@ -423,7 +502,7 @@ static void touch_ux_tick(void) {
         wake_touch_release_seen = false;
         touch_hold_active = false;
         if (screen == SCREEN_USAGE) {
-            if (ui_is_ble_connected()) {
+            if (ui_has_active_transport()) {
                 ui_force_view(2);
             } else {
                 ui_show_screen(SCREEN_SPLASH);
@@ -439,6 +518,7 @@ static void touch_ux_tick(void) {
     }
 }
 void loop() {
+    loop_count++;
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
@@ -526,29 +606,41 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (usage_parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            float rate_pct = usage.top.pct;
-            if (strcmp(usage.plan_type, "prepaid") == 0) {
-                // Prepaid: animation follows remaining balance level
-                splash_set_prepaid_balance((int)usage.bottom.pct);
-            } else {
-                // Subscription: top.pct is remaining % — invert to get used %
-                rate_pct = 100.0f - rate_pct;
-                usage_rate_sample(rate_pct);
-                int g_after = usage_rate_group();
-                if (g_after != g_before) {
-                    Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                        g_before, g_after, usage.top.pct);
-                    if (splash_is_active() && !pet_buffer_ready()) splash_pick_for_current_rate();
-                }
-            }
-            ui_update(&usage);
-            ble_send_ack();
+        const char* incoming = ble_get_data();
+        if (!incoming) return;
+        ble_rx_count++;
+        last_ble_rx_ms = millis();
+        if (wifi_fallback_apply_ble_config(incoming)) {
+            wifi_fallback_note_ble_data();
+            ble_send_wifi_config_result();
         } else {
-            ble_send_nack();
+            uint8_t brightness_pct = 0;
+            if (usage_extract_brightness_pct(incoming, &brightness_pct)
+                && brightness_pct != brightness_get_pct()) {
+                brightness_set_pct(brightness_pct);
+            }
+            if (usage_parse_json(incoming, &usage)) {
+                ble_parse_ok_count++;
+                last_ble_apply_ms = millis();
+                wifi_fallback_note_ble_data();
+                apply_usage_snapshot(usage);
+                ble_send_ack();
+            } else {
+                ble_parse_fail_count++;
+                ble_send_nack();
+            }
         }
     }
+
+    UsageData wifi_usage = {};
+    const bool wifi_updated = wifi_fallback_tick(&wifi_usage);
+    static wifi_fallback_state_t last_wifi_state = WIFI_FALLBACK_NOT_CONFIGURED;
+    const wifi_fallback_state_t wifi_state = wifi_fallback_get_state();
+    if (wifi_state != last_wifi_state) {
+        last_wifi_state = wifi_state;
+        ui_update_wifi_status(wifi_state);
+    }
+    if (wifi_updated) apply_usage_snapshot(wifi_usage);
 
     delay(5);
 }

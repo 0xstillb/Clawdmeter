@@ -34,8 +34,45 @@ from daemon.payloads import build_claude_usage_payload, build_codex_usage_payloa
 from daemon.plugin_runner import PluginRunner, PluginNotFoundError, PluginCrashedError
 from daemon.petdex.constants import PET_ANIM_CHAR_UUID
 from daemon.petdex.petdex_engine import PetdexEngine
+from daemon.wifi_fallback_config import load_wifi_config, mark_wifi_config_synced
 
 DEVICE_NAME = "Clawdmeter"
+
+# Brightness override priority: BRIGHTNESS_PCT environment variable, then the
+# file the tray writes. When neither is set, firmware keeps its saved setting.
+_BRIGHTNESS_FILE = (
+    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    / "clawdmeter"
+    / "brightness"
+)
+
+
+def _resolve_brightness_pct() -> int | None:
+    """Return the requested display brightness (0..100), if configured."""
+    raw = os.environ.get("BRIGHTNESS_PCT", "").strip()
+    if raw:
+        try:
+            return max(0, min(100, int(raw)))
+        except ValueError:
+            pass
+    try:
+        raw = _BRIGHTNESS_FILE.read_text(encoding="utf-8").strip()
+        if raw:
+            return max(0, min(100, int(raw)))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _apply_brightness_override(payload: dict) -> dict:
+    """Add the tray-selected brightness to a usage payload when present."""
+    pct = _resolve_brightness_pct()
+    if pct is None:
+        return payload
+    payload = dict(payload)
+    payload["brightness"] = pct
+    return payload
+
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"
@@ -583,6 +620,8 @@ def _payload_for_wire(payload: dict) -> dict:
         "st": payload["st"],
         "ok": payload["ok"],
     }
+    if "brightness" in payload:
+        wire["brightness"] = payload["brightness"]
     provider = payload.get("p")
     if isinstance(provider, str) and provider:
         wire["p"] = provider
@@ -660,6 +699,9 @@ class Session:
         # Pet animation: background task cycles through frames at hold_ms intervals
         self._pet_anim_task: asyncio.Task | None = None
         self._pet_anim_running = False
+        self._wifi_config_event = asyncio.Event()
+        self._wifi_config_result: str | None = None
+        self.wifi_status_callback = None
         # Current slug/state/hold for screen-driven pet switching
         self._pet_slug: str | None = None
         self._pet_state: str = "idle"
@@ -675,11 +717,36 @@ class Session:
         log("Refresh requested by device")
         self.refresh_requested.set()
 
-    def _on_screen_change(self, _char, data: bytearray) -> None:
-        """Called when device sends a screen state notification via tx_char."""
+    def _on_wifi_state(self, _char, data: bytearray) -> None:
+        """Handle a readable/notifiable Wi-Fi runtime state snapshot."""
         try:
             msg = json.loads(data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        status = msg.get("wifi_state")
+        if not isinstance(status, str):
+            return
+        log(f"CYD Wi-Fi status -> {status}")
+        if self.wifi_status_callback is not None:
+            self.wifi_status_callback(status)
+
+    def _on_tx(self, _char, data: bytearray) -> None:
+        """Handle screen state and Wi-Fi configuration responses from CYD."""
+        try:
+            msg = json.loads(data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        wifi_result = msg.get("wifi")
+        if isinstance(wifi_result, str):
+            if wifi_result == "updated":
+                self._wifi_config_result = wifi_result
+                self._wifi_config_event.set()
+            elif self.wifi_status_callback is not None:
+                log(f"CYD Wi-Fi status -> {wifi_result}")
+                self.wifi_status_callback(wifi_result)
+            return
+        if isinstance(msg.get("wifi_state"), str):
+            self._on_wifi_state(_char, data)
             return
         screen = msg.get("sc")
         if not screen or not self._pet_slug:
@@ -707,11 +774,12 @@ class Session:
             log(f"Refresh subscription unavailable: {e}")
         # Subscribe to screen-change notifications from the device
         try:
-            await self.client.start_notify(TX_CHAR_UUID, self._on_screen_change)
+            await self.client.start_notify(TX_CHAR_UUID, self._on_tx)
         except (BleakError, ValueError, OSError) as e:
             log(f"Screen subscription unavailable: {e}")
 
     async def write_payload(self, payload: dict) -> bool:
+        payload = _apply_brightness_override(payload)
         wire_payload = _payload_for_wire(payload)
         data = json.dumps(wire_payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
@@ -727,6 +795,33 @@ class Session:
             # silent-freeze failure mode, SC#2 field report).
             log(f"Write failed: {e}")
             return False
+
+    async def write_wifi_config(self, config: dict[str, str]) -> bool:
+        """Send credentials without putting the password or API key in logs."""
+        message = {
+            "wifi": {
+                "op": "set",
+                "ssid": config["ssid"],
+                "password": config["password"],
+                "provider": config["provider"],
+                "api_key": config["api_key"],
+            }
+        }
+        data = json.dumps(message, separators=(",", ":")).encode()
+        # CYD reserves a 512-byte receive buffer. Leave room for BLE framing.
+        if len(data) > 480:
+            log("Wi-Fi fallback configuration is too long for CYD")
+            return False
+        self._wifi_config_result = None
+        self._wifi_config_event.clear()
+        try:
+            await self.client.write_gatt_char(RX_CHAR_UUID, data, response=True)
+            async with asyncio.timeout(5.0):
+                await self._wifi_config_event.wait()
+        except (BleakError, OSError, asyncio.TimeoutError) as e:
+            log(f"Wi-Fi fallback configuration was not acknowledged: {e}")
+            return False
+        return self._wifi_config_result == "updated"
 
     async def send_pet_animation(self, slug: str, state: str = "idle",
                                   hold_ms: int = 200) -> bool:
@@ -980,16 +1075,22 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
 
     log("Connected")
     session = Session(client)
-    await session.setup_refresh_subscription()
+    if tray_state is not None:
+        session.wifi_status_callback = tray_state.note_wifi_status
+
+    # Let the ESP32 finish connection/service setup before the first GATT call.
+    # On WinRT, writing a CCCD immediately after connect can cancel the link.
+    await asyncio.sleep(0.75)
 
     # Health check: verify GATT services are actually accessible (WinRT can report
-    # is_connected=True while the link is half-open). Read a characteristic to
-    # confirm the GATT server is ready before entering the main loop.
+    # is_connected=True while the link is half-open). Do this before optional
+    # notification subscriptions, so a failed CCCD write cannot mask the cause.
+    initial_wifi_state = bytearray()
     try:
         async with asyncio.timeout(3.0):
             # Try reading the TX char — if service discovery never completed or
             # the GATT server rejected us, this raises BleakError immediately.
-            await client.read_gatt_char(TX_CHAR_UUID)
+            initial_wifi_state = await client.read_gatt_char(TX_CHAR_UUID)
     except (BleakError, OSError, asyncio.TimeoutError) as e:
         log(f"GATT health check failed: {e}")
         try:
@@ -998,11 +1099,35 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
             pass
         return False
     log("GATT health check passed")
+    # TX's stable value is the latest Wi-Fi snapshot. Transient ACK/screen
+    # notifications restore this snapshot shortly after they are sent.
+    if initial_wifi_state:
+        session._on_tx(None, bytearray(initial_wifi_state))
+
+    # These subscriptions are optional; the regular poll/write path works even
+    # when a Windows Bluetooth stack refuses a CCCD operation.
+    await session.setup_refresh_subscription()
+    # Firmware announces screen, saved-config, and current Wi-Fi runtime state
+    # after the TX CCCD is enabled.  Do not overlap the first RX payload write
+    # with that short notification handshake; WinRT otherwise occasionally
+    # cancels the whole GATT operation even though both peers remain healthy.
+    await asyncio.sleep(0.8)
+
+    pending_wifi_config = load_wifi_config(pending_only=True)
+    if pending_wifi_config:
+        if await session.write_wifi_config(pending_wifi_config):
+            mark_wifi_config_synced(pending_wifi_config)
+            if tray_state is not None:
+                tray_state.note_wifi_settings_changed()
+            log("Wi-Fi fallback configuration applied to CYD")
+        else:
+            log("Wi-Fi fallback configuration remains pending")
 
     refresh_callback = session.refresh_requested.set
     if tray_state is not None:
         tray_state.refresh_callback = refresh_callback
         tray_state.daemon_send_pet = session.send_pet_animation
+        tray_state.daemon_send_wifi = session.write_wifi_config
 
     last_poll = 0.0  # D-03: poll immediately on first connect
     used_successfully = False
@@ -1102,6 +1227,8 @@ async def connect_and_run(device, stop_event: asyncio.Event, tray_state=None) ->
         if tray_state is not None and tray_state.refresh_callback is refresh_callback:
             tray_state.refresh_callback = None
             tray_state.daemon_send_pet = None
+            tray_state.daemon_send_wifi = None
+        session.wifi_status_callback = None
         # Clean GATT disconnect on the way out — this is what tells the peripheral
         # the link is gone. WinRT can surface a raw OSError (not BleakError) here,
         # so swallow both; the link tears down regardless once we exit.

@@ -333,6 +333,18 @@ bool usage_parse_json(const char* json, UsageData* out) {
     return false;
 }
 
+bool usage_extract_brightness_pct(const char* json, uint8_t* out_pct) {
+    if (!json || !out_pct) return false;
+
+    int pct = 0;
+    const char* end = json + strlen(json);
+    if (!parse_int_field(json, end, "brightness", &pct)) return false;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    *out_pct = (uint8_t)pct;
+    return true;
+}
+
 void usage_panel_display_subtext(const UsagePanelData* panel, char* buf, size_t len) {
     if (!buf || len == 0) return;
     buf[0] = '\0';
