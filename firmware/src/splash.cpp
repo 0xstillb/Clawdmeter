@@ -28,6 +28,7 @@ static uint32_t frame_started_ms = 0;
 static uint32_t last_pick_ms = 0;
 static bool active = false;
 static uint8_t splash_phase = 0;
+static bool canvas_buffer_lent = false;
 
 // Splash pet frame state (reset when pet changes)
 static uint32_t s_splash_pet_timer = 0;
@@ -95,13 +96,17 @@ static void render_hermes_splash(void) {
     const int px = (canvas_w >= 180) ? 7 : 6;
     const int art_w = 20 * px;
     const int ox = (canvas_w - art_w) / 2;
-    const int oy = (canvas_h - art_w) / 2 + ((splash_phase % 24) < 12 ? 0 : 1);
+    // A visible but gentle 4 px breathing/bob cycle. The old 1 px two-state
+    // shift was effectively invisible on the CYD and looked like a frozen UI.
+    static const int8_t BOB_24[24] = {
+         0,  0, -1, -1, -2, -3, -3, -4, -4, -3, -3, -2,
+        -1,  0,  0,  1,  1,  2,  2,  1,  1,  0,  0,  0,
+    };
+    const int oy = (canvas_h - art_w) / 2 + BOB_24[splash_phase % 24];
 
     if (pet_buffer_ready()) {
-        // ══ Pet (frame 0, static) ══
-        // Splash shows one still frame. Different moods come from daemon
-        // sending different state data (idle/run/error).
-        const uint8_t* frame = pet_buffer_frame(0);
+        // ══ Animated Petdex pet ══
+        const uint8_t* frame = pet_buffer_frame(s_splash_pet_frame);
         if (frame) {
             for (int y = 0; y < 20; ++y) {
                 for (int x = 0; x < 20; ++x) {
@@ -253,17 +258,76 @@ void splash_init(lv_obj_t *parent) {
 void splash_tick(void) {
     if (!active) return;
 
+    const uint32_t now = millis();
+
+    if (pet_buffer_ready()) {
+        uint16_t frame_count = pet_buffer_frame_count();
+        if (frame_count < 1) frame_count = 1;
+        uint32_t hold_ms = pet_buffer_hold_ms();
+        // Protect the render loop from malformed or extreme host timing.
+        if (hold_ms < 50) hold_ms = 50;
+        if (hold_ms > 2000) hold_ms = 2000;
+        if (s_splash_pet_frame >= frame_count) s_splash_pet_frame = 0;
+
+        bool redraw = false;
+        if (now - s_splash_pet_timer >= hold_ms) {
+            s_splash_pet_timer = now;
+            s_splash_pet_frame = (s_splash_pet_frame + 1) % frame_count;
+            redraw = true;
+        }
+        // Keep the subtle background particles moving independently.
+        if (now - frame_started_ms >= 130) {
+            frame_started_ms = now;
+            splash_phase++;
+            redraw = true;
+        }
+        if (redraw) render_hermes_splash();
+        return;
+    }
+
     // Auto-rotate to the next animation in the current group.
     // Skip if a user-selected pet is loaded (petdex override).
-    if (!pet_buffer_ready() && millis() - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
+    if (now - last_pick_ms >= SPLASH_ROTATE_INTERVAL_MS) {
         splash_pick_for_current_rate();
     }
 
-    if (millis() - frame_started_ms >= 130) {
-        frame_started_ms = millis();
+    if (now - frame_started_ms >= 130) {
+        frame_started_ms = now;
         splash_phase++;
         render_hermes_splash();
     }
+}
+
+bool splash_release_buffer_for_network(void) {
+#ifdef BOARD_HAS_PSRAM
+    return false;
+#else
+    if (!canvas || !canvas_buf || canvas_buffer_lent) return false;
+    lv_obj_add_flag(canvas, LV_OBJ_FLAG_HIDDEN);
+    heap_caps_free(canvas_buf);
+    canvas_buf = NULL;
+    canvas_buffer_lent = true;
+    return true;
+#endif
+}
+
+bool splash_restore_buffer_after_network(void) {
+#ifdef BOARD_HAS_PSRAM
+    return true;
+#else
+    if (!canvas_buffer_lent) return true;
+    canvas_buf = (uint16_t*)heap_caps_malloc(
+        canvas_w * canvas_h * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!canvas_buf) {
+        Serial.println("splash: failed to restore canvas after network request");
+        return false;
+    }
+    lv_canvas_set_buffer(canvas, canvas_buf, canvas_w, canvas_h, LV_COLOR_FORMAT_RGB565);
+    render_hermes_splash();
+    lv_obj_clear_flag(canvas, LV_OBJ_FLAG_HIDDEN);
+    canvas_buffer_lent = false;
+    return true;
+#endif
 }
 
 void splash_next(void) {

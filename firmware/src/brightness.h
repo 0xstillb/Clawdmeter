@@ -8,3 +8,5 @@
 void    brightness_init(void);    // load saved level from NVS and apply
 void    brightness_cycle(void);   // advance to next level, save, apply
 uint8_t brightness_get(void);     // current PWM level (0..255)
+uint8_t brightness_get_pct(void); // current level as a percentage (0..100)
+void    brightness_set_pct(uint8_t pct); // set and persist an arbitrary percentage

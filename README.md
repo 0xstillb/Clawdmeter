@@ -157,6 +157,44 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 หลังแก้ credential ให้เลือก **Restart** จาก tray (หรือ Quit แล้วเปิด
 `Start Clawdmeter.cmd` อีกครั้ง)
 
+## Wi-Fi fallback เมื่อปิดคอม (เฉพาะ API key)
+
+CYD สามารถดึง usage เองผ่าน Wi-Fi ได้เมื่อ daemon/BLE ไม่มีข้อมูลต่อเนื่อง
+90 วินาที จึงใช้ดูยอดต่อได้แม้ปิดคอมพิวเตอร์อยู่ ขณะ daemon ส่งข้อมูลตามปกติ
+BLE จะมีสิทธิ์ก่อน และ Wi-Fi จะปิดเพื่อลดการใช้วิทยุร่วมกัน
+
+รองรับ direct API ใน firmware สำหรับ **DeepSeek, OpenRouter และ MiniMax**
+เท่านั้น ส่วน **Claude, Codex, OpenCode Go และ Zen** ยังคงใช้ daemon ผ่าน BLE;
+โดยเฉพาะ Go/Zen ต้องใช้ cookie กับ workspace ID จึงไม่เก็บ credential เหล่านั้น
+ไว้บนบอร์ด
+
+บน Windows ที่แฟลช firmware รุ่นนี้แล้ว ให้คลิกขวาไอคอน Clawdmeter ใน system tray
+แล้วเลือก **Wi-Fi fallback…** กรอกชื่อ/รหัส Wi-Fi แล้วกด **Save to CYD**. ชื่อเครือข่าย
+ที่ Windows กำลังใช้อยู่จะถูกตรวจพบอัตโนมัติ; API key และ provider จะเลือกจาก credential
+ที่ตั้งค่าไว้ใน tray แล้วโดยอัตโนมัติ (DeepSeek, OpenRouter หรือ MiniMax) หากบอร์ดยังไม่เชื่อม
+BLE ค่าจะรอส่งโดยอัตโนมัติเมื่อเชื่อมครั้งถัดไป; หลัง CYD ยืนยันรับค่า Windows จะลบสำเนา
+credential ที่รอส่งออกเอง
+
+เมื่อ CYD เชื่อม Wi-Fi สำเร็จขณะที่ Windows tray ยังเชื่อมผ่าน BLE อยู่ จะมี notification
+**CYD Wi-Fi connected** ปรากฏใน Windows. หากปิดคอมอยู่ CYD ยังทำงานเองได้ตามปกติ แต่
+แน่นอนว่าจะไม่มี Windows ให้แสดง notification ในขณะนั้น
+
+หรือจะตั้งค่าผ่าน USB serial monitor (เช่น `pio device monitor -p COM7 -b 115200`)
+ก็ได้ โดยพิมพ์ทีละคำสั่ง:
+
+```text
+wifi network ชื่อWiFi รหัสผ่านWiFi
+wifi provider deepseek API_KEY
+# หรือ: wifi provider openrouter API_KEY
+# หรือ: wifi provider minimax API_KEY
+wifi status
+```
+
+SSID และรหัสผ่านในคำสั่งนี้ต้องไม่มีช่องว่าง; พิมพ์ `wifi help` เพื่อดูคำสั่ง
+และ `wifi clear` เพื่อลบข้อมูลทั้งหมด การเชื่อมต่อไปยัง provider ใช้ HTTPS พร้อม
+ตรวจสอบใบรับรอง แต่ API key และ Wi-Fi password ถูกเก็บใน NVS ของ CYD เพื่อให้
+บอร์ดทำงานเองหลังรีสตาร์ต—อย่าใช้กับบอร์ดที่ผู้อื่นเข้าถึงทางกายภาพได้
+
 ## การใช้งานจอ
 
 - แตะจอเพื่อสลับ Splash ↔ Usage

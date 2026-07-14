@@ -170,6 +170,18 @@ static void test_codex_weekly_only() {
     expect(data.top.pct == 63.0f, "top panel should use the weekly remaining percent");
 }
 
+static void test_brightness_field() {
+    uint8_t pct = 0;
+    expect(usage_extract_brightness_pct(R"json({"brightness":75})json", &pct),
+           "brightness field should parse");
+    expect(pct == 75, "brightness should retain its valid percentage");
+    expect(usage_extract_brightness_pct(R"json({"brightness":250})json", &pct),
+           "out-of-range brightness should still parse");
+    expect(pct == 100, "brightness should clamp above 100");
+    expect(!usage_extract_brightness_pct(R"json({"brightness":"high"})json", &pct),
+           "non-numeric brightness should be ignored");
+}
+
 int main(int argc, char** argv) {
     expect(argc == 2, "expected exactly one scenario argument");
 
@@ -187,6 +199,8 @@ int main(int argc, char** argv) {
         test_zen_prepaid();
     } else if (std::strcmp(argv[1], "codex_weekly_only") == 0) {
         test_codex_weekly_only();
+    } else if (std::strcmp(argv[1], "brightness_field") == 0) {
+        test_brightness_field();
     } else {
         std::cerr << "unknown scenario: " << argv[1] << std::endl;
         return 2;

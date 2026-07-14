@@ -1,6 +1,7 @@
 #include "ble.h"
 #include "pet_buffer.h"
 #include "ui.h"
+#include "wifi_fallback.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
@@ -67,9 +68,37 @@ static NimBLECharacteristic* pet_anim_char = nullptr;
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
 static char rx_buf[BLE_BUF_SIZE];
+static char rx_read_buf[BLE_BUF_SIZE];
 static volatile bool data_ready = false;
+static portMUX_TYPE rx_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool has_received_data = false;
+// WinRT may cancel a GATT connection when a peripheral sends a notification
+// from inside the client's CCCD subscription write.  Queue initial notices
+// and send them from ble_tick() after that ATT operation has completed.
+static volatile bool pending_refresh_request = false;
+static volatile bool pending_screen_announce = false;
+static volatile bool pending_wifi_configured = false;
+static volatile bool pending_wifi_runtime_announce = false;
+static volatile bool pending_wifi_snapshot_restore = false;
+static volatile bool tx_subscribed = false;
+static volatile uint32_t control_notify_after_ms = 0;
+static volatile uint32_t wifi_snapshot_restore_after_ms = 0;
+static bool radio_paused_for_wifi = false;
 static char mac_str[18];
+
+static void set_wifi_runtime_snapshot() {
+    if (!tx_char) return;
+    char buf[48];
+    snprintf(buf, sizeof(buf), "{\"wifi_state\":\"%s\"}",
+             wifi_fallback_state_name(wifi_fallback_get_state()));
+    tx_char->setValue(buf);
+}
+
+static void schedule_wifi_snapshot_restore() {
+    pending_wifi_snapshot_restore = true;
+    wifi_snapshot_restore_after_ms = millis() + 200;
+    control_notify_after_ms = millis() + 150;
+}
 
 static void start_advertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
@@ -105,12 +134,15 @@ static void start_advertising() {
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
         state = BLE_STATE_CONNECTED;
+        tx_subscribed = false;
         Serial.printf("BLE: connected from %s (active=%u)\n",
             info.getAddress().toString().c_str(),
             (unsigned)s->getConnectedCount());
-        // Notify daemon of current screen right after connection so pet
-        // state (jumping/review/idle) matches the display immediately.
-        ble_send_screen(ui_get_current_screen() == SCREEN_SPLASH ? "splash" : "usage");
+        // Announce the current screen once the central has subscribed to TX.
+        // Notifying directly from onConnect can race the Windows GATT setup.
+        pending_screen_announce = true;
+        pending_wifi_configured = wifi_fallback_is_configured();
+        pending_wifi_runtime_announce = true;
         // Keep advertising while a connection slot is still free so a second
         // central (e.g. the host daemon alongside an OS-held HID link) can
         // discover and connect. NimBLE auto-stops advertising on each accept.
@@ -123,6 +155,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // Only flip the UI state to DISCONNECTED when the last client leaves.
         if (s->getConnectedCount() == 0) state = BLE_STATE_DISCONNECTED;
         need_advertise = true;
+        tx_subscribed = false;
         Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
             reason, (unsigned)s->getConnectedCount());
     }
@@ -133,9 +166,11 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& info) override {
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
+        portENTER_CRITICAL(&rx_mux);
         memcpy(rx_buf, val.c_str(), len);
         rx_buf[len] = '\0';
         data_ready = true;
+        portEXIT_CRITICAL(&rx_mux);
         has_received_data = true;
     }
 };
@@ -161,12 +196,26 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
     void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
         Serial.printf("BLE: req_char onSubscribe subValue=%u has_data=%d\n", subValue, has_received_data ? 1 : 0);
         if (subValue != 0 && !has_received_data) {
-            ble_request_refresh();
+            pending_refresh_request = true;
+        }
+    }
+};
+
+class TxCallbacks : public NimBLECharacteristicCallbacks {
+    void onSubscribe(NimBLECharacteristic*, NimBLEConnInfo&, uint16_t subValue) override {
+        tx_subscribed = subValue != 0;
+        if (tx_subscribed) {
+            pending_screen_announce = true;
+            pending_wifi_runtime_announce = true;
+            // Let the WinRT CCCD write finish before the first notification.
+            // Subsequent control notifications are paced in ble_tick().
+            control_notify_after_ms = millis() + 250;
         }
     }
 };
 
 void ble_init(void) {
+    radio_paused_for_wifi = false;
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
 
@@ -179,7 +228,7 @@ void ble_init(void) {
 
     server = NimBLEDevice::createServer();
     static ServerCallbacks serverCb;
-    server->setCallbacks(&serverCb);
+    server->setCallbacks(&serverCb, false);
 
     // --- Custom data service ---
     NimBLEService* svc = server->createService(SERVICE_UUID);
@@ -195,6 +244,9 @@ void ble_init(void) {
         TX_CHAR_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
+    static TxCallbacks txCb;
+    tx_char->setCallbacks(&txCb);
+    set_wifi_runtime_snapshot();
 
     req_char = svc->createCharacteristic(
         REQ_CHAR_UUID,
@@ -233,6 +285,36 @@ void ble_tick(void) {
         need_advertise = false;
         start_advertising();
     }
+    if (state == BLE_STATE_CONNECTED && pending_refresh_request) {
+        pending_refresh_request = false;
+        ble_request_refresh();
+    }
+    if (state == BLE_STATE_CONNECTED && tx_subscribed
+        && (int32_t)(millis() - control_notify_after_ms) >= 0) {
+        if (pending_screen_announce) {
+            pending_screen_announce = false;
+            ble_send_screen(ui_get_current_screen() == SCREEN_SPLASH ? "splash" : "usage");
+            return;
+        }
+        if (pending_wifi_configured) {
+            pending_wifi_configured = false;
+            ble_send_wifi_status("configured");
+            return;
+        }
+        if (pending_wifi_runtime_announce) {
+            pending_wifi_runtime_announce = false;
+            pending_wifi_snapshot_restore = false;
+            set_wifi_runtime_snapshot();
+            tx_char->notify();
+            control_notify_after_ms = millis() + 150;
+            return;
+        }
+    }
+    if (pending_wifi_snapshot_restore
+        && (int32_t)(millis() - wifi_snapshot_restore_after_ms) >= 0) {
+        pending_wifi_snapshot_restore = false;
+        set_wifi_runtime_snapshot();
+    }
 }
 
 ble_state_t ble_get_state(void) {
@@ -261,18 +343,30 @@ bool ble_has_bonds(void) {
 }
 
 bool ble_has_data(void) {
-    return data_ready;
+    portENTER_CRITICAL(&rx_mux);
+    const bool ready = data_ready;
+    portEXIT_CRITICAL(&rx_mux);
+    return ready;
 }
 
 const char* ble_get_data(void) {
+    portENTER_CRITICAL(&rx_mux);
+    if (!data_ready) {
+        portEXIT_CRITICAL(&rx_mux);
+        return nullptr;
+    }
+    memcpy(rx_read_buf, rx_buf, sizeof(rx_read_buf));
     data_ready = false;
-    return rx_buf;
+    portEXIT_CRITICAL(&rx_mux);
+    rx_read_buf[BLE_BUF_SIZE - 1] = '\0';
+    return rx_read_buf;
 }
 
 void ble_send_ack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"ack\":true}");
         tx_char->notify();
+        schedule_wifi_snapshot_restore();
     }
 }
 
@@ -280,7 +374,74 @@ void ble_send_nack(void) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
         tx_char->setValue("{\"err\":true}");
         tx_char->notify();
+        schedule_wifi_snapshot_restore();
     }
+}
+
+void ble_send_wifi_config_result(void) {
+    ble_send_wifi_status("updated");
+}
+
+void ble_send_wifi_status(const char* status) {
+    if (!status) return;
+    if (state == BLE_STATE_CONNECTED && tx_char) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "{\"wifi\":\"%s\"}", status);
+        tx_char->setValue(buf);
+        tx_char->notify();
+        schedule_wifi_snapshot_restore();
+    }
+}
+
+void ble_publish_wifi_runtime_state(const char* status) {
+    if (!status || !tx_char) return;
+    set_wifi_runtime_snapshot();
+    pending_wifi_snapshot_restore = false;
+    if (state == BLE_STATE_CONNECTED && tx_subscribed) {
+        pending_wifi_runtime_announce = true;
+    }
+}
+
+bool ble_pause_for_wifi_request(void) {
+    if (radio_paused_for_wifi || !NimBLEDevice::isInitialized()) return true;
+    tx_subscribed = false;
+    need_advertise = false;
+    pending_refresh_request = false;
+    pending_screen_announce = false;
+    pending_wifi_configured = false;
+    pending_wifi_runtime_announce = false;
+    pending_wifi_snapshot_restore = false;
+    // The server owns the HID services, while this small wrapper is allocated
+    // separately. Drop it before deleting/rebuilding the complete GATT tree so
+    // repeated Wi-Fi polls do not leak one wrapper per cycle.
+    delete hid_dev;
+    hid_dev = nullptr;
+    if (!NimBLEDevice::deinit(true)) {
+        Serial.println("BLE: pause for Wi-Fi request failed");
+        return false;
+    }
+    server = nullptr;
+    input_kbd = nullptr;
+    tx_char = nullptr;
+    rx_char = nullptr;
+    req_char = nullptr;
+    pet_anim_char = nullptr;
+    radio_paused_for_wifi = true;
+    state = BLE_STATE_DISCONNECTED;
+    Serial.println("BLE: paused for Wi-Fi HTTPS request");
+    return true;
+}
+
+bool ble_resume_after_wifi_request(void) {
+    if (!radio_paused_for_wifi) return true;
+    radio_paused_for_wifi = false;
+    ble_init();
+    if (!NimBLEDevice::isInitialized() || !server) {
+        Serial.println("BLE: resume after Wi-Fi request failed");
+        return false;
+    }
+    Serial.println("BLE: resumed after Wi-Fi HTTPS request");
+    return true;
 }
 
 void ble_request_refresh(void) {
@@ -298,6 +459,7 @@ void ble_send_screen(const char* screen_name) {
     snprintf(buf, sizeof(buf), "{\"sc\":\"%s\"}", screen_name);
     tx_char->setValue(buf);
     tx_char->notify();
+    schedule_wifi_snapshot_restore();
     Serial.printf("BLE: screen -> %s\n", screen_name);
 }
 

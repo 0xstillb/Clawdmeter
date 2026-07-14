@@ -98,13 +98,19 @@ def test_build_deepseek_prepaid_payload() -> None:
     assert p["p"] == "deepseek"
     assert p["plan_type"] == "prepaid"
     assert p["top"]["kind"] == "budget_daily"
-    assert p["top"]["label"] == "Paid + Grant"
-    assert p["top"]["subtext"] == "USD 40.00 + G 10.00"
+    assert p["top"]["label"] == "Used"
+    assert p["top"]["subtext"] == "USD 0.00"
     assert p["bottom"]["kind"] == "wallet_depletion"
     assert p["bottom"]["pct"] == 50
-    assert p["bottom"]["label"] == "Balance"
+    assert p["bottom"]["label"] == "Remaining"
     assert p["bottom"]["subtext"] == "USD 50.00"
     assert p["st"] == "allowed"
+
+    p = build_deepseek_usage_payload(balance, now=now, total_budget=50.0)
+    assert p["top"]["pct"] == 0.0
+    assert p["top"]["subtext"] == "USD 0.00"
+    assert p["bottom"]["label"] == "Remaining"
+    assert p["budget"] == 50.0
 
 
 def test_build_openrouter_prepaid_payload() -> None:
