@@ -609,7 +609,8 @@ static void render_hermes_header_icon(int mode, uint8_t phase) {
             for (int sy = 0; sy < 20; ++sy) {
                 for (int sx = 0; sx < 20; ++sx) {
                     uint8_t idx = frame[sy * 20 + sx];
-                    // All indices are opaque. Scale 20→54 with exact ranges (no gaps)
+                    if (idx == 0 || idx >= PET_PAL_MAX) continue;
+                    // Scale 20→54 with exact ranges (no gaps).
                     int x0 = (sx * 54) / 20;
                     int x1 = ((sx + 1) * 54) / 20;
                     int y0 = (sy * 54) / 20;
@@ -677,9 +678,13 @@ static void render_hermes_idle_icon(uint8_t phase) {
         if (frame) {
             for (int i = 0; i < 400; i++) {
                 uint8_t idx = frame[i];
-                // ALL palette indices are opaque — pet sprite fills 20×20
-                rgb[i] = pet_buffer_palette()[idx];
-                alpha[i] = 255;
+                if (idx == 0 || idx >= PET_PAL_MAX) {
+                    rgb[i] = 0;
+                    alpha[i] = 0;
+                } else {
+                    rgb[i] = pet_buffer_palette()[idx];
+                    alpha[i] = 255;
+                }
             }
             if (idle_canvas) lv_obj_invalidate(idle_canvas);
             return;

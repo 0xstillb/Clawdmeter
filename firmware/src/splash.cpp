@@ -111,7 +111,7 @@ static void render_hermes_splash(void) {
             for (int y = 0; y < 20; ++y) {
                 for (int x = 0; x < 20; ++x) {
                     uint8_t idx = frame[y * 20 + x];
-                    // All indices are opaque
+                    if (idx == 0 || idx >= PET_PAL_MAX) continue;
                     put_square(ox + x * px, oy + y * px, px,
                         pet_buffer_palette()[idx]);
                 }

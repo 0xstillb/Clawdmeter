@@ -44,7 +44,9 @@ void pet_buffer_clear(void) {
 bool pet_buffer_load(const uint8_t* data, size_t len) {
     if (!g_frames || !g_back_buffer) return false;
 
-    if (len < 4) return false;  // hold_ms + frame_count minimum
+    // Every update carries one complete frame. Reject truncated long writes
+    // before reading the palette or exposing stale pixels to the renderer.
+    if (len < PET_BLE_HEADER + PET_CELLS) return false;
 
     // Minimal parsing in NimBLE task context; the heavy memcpy goes to the
     // back buffer and the main loop applies it via pet_buffer_tick().

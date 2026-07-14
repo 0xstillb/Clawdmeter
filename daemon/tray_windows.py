@@ -1291,6 +1291,9 @@ def main() -> None:
     _pet_engine.discover()
 
     # --- Petdex helpers ---
+    def _pet_label(slug: str) -> str:
+        return _pet_engine.get_display_name(slug)
+
     def _on_pet_select(slug: str, state_and_hold: tuple[str, int]) -> None:
         if ts.loop is None or ts.daemon_send_pet is None:
             return
@@ -1333,7 +1336,7 @@ def main() -> None:
             checked = (slug == _pet_engine.active_slug)
             marker = "✓ " if checked else "  "
             items.append(MenuItem(
-                f"{marker}{slug.capitalize()} ▶",
+                f"{marker}{_pet_label(slug)} ▶",
                 Menu(
                     MenuItem("Apply", _pet_select_action(slug)),
                     MenuItem("Preview...", _pet_preview_action(slug)),
@@ -1357,7 +1360,7 @@ def main() -> None:
 
         def _show() -> None:
             root = tk.Tk()
-            root.title(f"Petdex: {slug.capitalize()}")
+            root.title(f"Petdex: {_pet_label(slug)}")
             root.configure(bg="#050608")
             root.resizable(False, False)
 

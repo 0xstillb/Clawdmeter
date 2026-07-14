@@ -9,7 +9,8 @@
 #define PET_MAX_FRAMES_STORED 1    // Store only 1 frame (matches what daemon sends)
 #define PET_BUF_BYTES (PET_MAX_FRAMES_STORED * PET_CELLS) // 400
 
-// BLE payload header: hold_ms(2) + frame_count(2) + palette(32)
+// BLE payload header: hold_ms(2) + frame_count(2) + palette(32).
+// Palette index 0 is transparent; visible pixels use indices 1..15.
 #define PET_BLE_HEADER    36
 
 // ── Lifecycle ──
@@ -17,7 +18,7 @@ bool   pet_buffer_alloc(void);          // malloc(PET_BUF_BYTES), no PSRAM
 void   pet_buffer_free(void);
 
 // ── BLE callback calls this (NimBLE task context) ──
-//   payload format: [hold_ms:u16][frame_count:u16][palette:10×u16][N×400 bytes]
+//   payload format: [hold_ms:u16][frame_count:u16][palette:16×u16][N×400 bytes]
 //   g_pet_loaded = true only AFTER full memcpy.
 bool   pet_buffer_load(const uint8_t* data, size_t len);
 

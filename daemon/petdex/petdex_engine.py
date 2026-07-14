@@ -4,25 +4,46 @@ Petdex -> Clawdmeter converter.
 
 Converts petdex PNG sprite sequences to the ESP32 binary BLE payload format:
 
-  [hold_ms:u16][frame_count:u16][palette:10xuint16][N*400 bytes]
+  [hold_ms:u16][frame_count:u16][palette:16xuint16][N*400 bytes]
+
+Palette index 0 is reserved for transparency. Visible pixels use indices 1-15.
 
 Clawdmeter-local pool directory structure:
+  daemon/petdex/pool/<slug>/pet.json
   daemon/petdex/pool/<slug>/<state>/*.png
 """
 
+import json
 import struct
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageChops
 
 GRID = 20
+PET_CELLS = GRID * GRID
 PAL_MAX = 16
+VISIBLE_COLORS = PAL_MAX - 1
+ALPHA_THRESHOLD = 128
+MATTE_ALPHA_CUTOFF = 192
 PET_MAX_FRAMES = 48
+PET_BLE_HEADER = 4 + PAL_MAX * 2
 POOL_DIR = Path(__file__).resolve().parent / "pool"
+STANDARD_STATE_ORDER = (
+    "idle",
+    "running-right",
+    "running-left",
+    "waving",
+    "jumping",
+    "failed",
+    "waiting",
+    "running",
+    "review",
+)
 
 
 class PetdexEngine:
     def __init__(self):
         self.pets = {}        # slug -> {states: {name: [png_paths]}}
+        self.pet_meta = {}    # slug -> pet.json metadata (best-effort)
         self.active_slug = None
         self._frame_cache: dict[tuple[str, str, int], list[bytes]] = {}  # (slug, state, hold_ms) -> [payload_bytes]
         POOL_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,43 +51,167 @@ class PetdexEngine:
     def discover(self) -> dict:
         """Scan pool/ for installed pets and their states."""
         self.pets.clear()
+        self.pet_meta.clear()
         self._frame_cache.clear()
         for pet_dir in sorted(POOL_DIR.iterdir()):
             if not pet_dir.is_dir() or pet_dir.name.startswith("."):
                 continue
+            meta = {"id": pet_dir.name, "displayName": pet_dir.name}
+            meta_path = pet_dir / "pet.json"
+            if meta_path.is_file():
+                try:
+                    raw_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    raw_meta = None
+                if isinstance(raw_meta, dict):
+                    pet_id = raw_meta.get("id")
+                    if isinstance(pet_id, str) and pet_id.strip():
+                        meta["id"] = pet_id.strip()
+                    display_name = raw_meta.get("displayName")
+                    if isinstance(display_name, str) and display_name.strip():
+                        meta["displayName"] = display_name.strip()
             states = {}
-            for state_dir in sorted(pet_dir.iterdir()):
+            seen = set()
+            for state_name in STANDARD_STATE_ORDER:
+                state_dir = pet_dir / state_name
                 if not state_dir.is_dir():
+                    continue
+                pngs = sorted(state_dir.glob("*.png"))
+                if pngs:
+                    states[state_dir.name] = [str(p) for p in pngs]
+                    seen.add(state_dir.name)
+            for state_dir in sorted(pet_dir.iterdir()):
+                if not state_dir.is_dir() or state_dir.name in seen or state_dir.name.startswith("."):
                     continue
                 pngs = sorted(state_dir.glob("*.png"))
                 if pngs:
                     states[state_dir.name] = [str(p) for p in pngs]
             if states:
                 self.pets[pet_dir.name] = states
+                self.pet_meta[pet_dir.name] = meta
         return self.pets
 
-    def _convert_single(self, path: str, palette_rgb565: list[int] | None) -> tuple[bytes, list[int]] | None:
-        """Load one PNG, quantize, return (palette_idx_bytes, palette_rgb565)."""
-        img = Image.open(path).convert("RGB").resize((GRID, GRID), Image.Resampling.NEAREST)
-        img = img.quantize(colors=PAL_MAX)
+    def get_display_name(self, slug: str) -> str:
+        meta = self.pet_meta.get(slug)
+        if isinstance(meta, dict):
+            display_name = meta.get("displayName")
+            if isinstance(display_name, str) and display_name.strip():
+                return display_name
+        return slug.capitalize()
 
-        pal_raw = img.getpalette()
-        if pal_raw is None:
+    @staticmethod
+    def _rgb565(rgb: tuple[int, int, int]) -> int:
+        r, g, b = rgb
+        return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+    @staticmethod
+    def _prepare_frame(path: str) -> tuple[list[tuple[int, int, int]], list[bool]]:
+        """Downsample one frame without pulling hidden atlas colors into edges."""
+        with Image.open(path) as source:
+            image = source.convert("RGBA")
+
+        alpha = image.getchannel("A")
+        # Discard very faint atlas matte pixels before downsampling. The Codex
+        # sheets contain magenta RGB values behind transparent pixels.
+        mask = alpha.point(lambda value: value if value >= ALPHA_THRESHOLD else 0)
+        channels = image.getchannel("R"), image.getchannel("G"), image.getchannel("B")
+        premultiplied = [
+            ImageChops.multiply(channel, mask).resize(
+                (GRID, GRID), Image.Resampling.BOX
+            )
+            for channel in channels
+        ]
+        resized_alpha = mask.resize((GRID, GRID), Image.Resampling.BOX)
+        alpha_values = list(resized_alpha.getdata())
+        color_values = [list(channel.getdata()) for channel in premultiplied]
+
+        colors: list[tuple[int, int, int]] = []
+        visible: list[bool] = []
+        for pixel, coverage in enumerate(alpha_values):
+            is_visible = coverage >= ALPHA_THRESHOLD
+            if is_visible:
+                color = tuple(
+                    min(255, (color_values[channel][pixel] * 255 + coverage // 2) // coverage)
+                    for channel in range(3)
+                )
+                r, g, b = color
+                # Remove semi-transparent magenta matte remnants at the
+                # silhouette edge while retaining opaque red/purple artwork.
+                is_matte = (
+                    coverage < MATTE_ALPHA_CUTOFF
+                    and r > g
+                    and b > g
+                    and max(color) - min(color) >= 8
+                    and abs(r - b) < 90
+                )
+                if is_matte:
+                    is_visible = False
+            visible.append(is_visible)
+            if is_visible:
+                colors.append(color)
+            else:
+                colors.append((0, 0, 0))
+        return colors, visible
+
+    def _convert_frames(self, paths: list[str]) -> tuple[list[bytes], list[int]] | None:
+        """Quantize frames against one shared palette with index 0 transparent."""
+        prepared = [self._prepare_frame(path) for path in paths]
+        visible_colors = [
+            color
+            for colors, visible in prepared
+            for color, is_visible in zip(colors, visible)
+            if is_visible
+        ]
+        if not visible_colors:
             return None
 
-        rgb565 = []
-        for i in range(0, min(len(pal_raw), PAL_MAX * 3), 3):
-            r, g, b = pal_raw[i], pal_raw[i + 1], pal_raw[i + 2]
-            rgb565.append(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))
-        while len(rgb565) < PAL_MAX:
-            rgb565.append(0)
+        palette_source = Image.new("RGB", (len(visible_colors), 1))
+        palette_source.putdata(visible_colors)
+        quantized = palette_source.quantize(
+            colors=VISIBLE_COLORS,
+            # MAXCOVERAGE keeps rare accent colors instead of spending most
+            # slots on nearly identical whites from the pet's body.
+            method=Image.Quantize.MAXCOVERAGE,
+            dither=Image.Dither.NONE,
+        )
+        raw_palette = quantized.getpalette()
+        if raw_palette is None:
+            return None
 
-        if palette_rgb565 is not None:
-            # Use the established palette (first frame's palette)
-            rgb565 = palette_rgb565
+        used_colors = quantized.getcolors(maxcolors=len(visible_colors)) or []
+        palette_size = max((index for _, index in used_colors), default=-1) + 1
+        palette_size = min(palette_size, VISIBLE_COLORS)
+        palette_rgb = [
+            tuple(raw_palette[index * 3:index * 3 + 3])
+            for index in range(palette_size)
+        ]
+        if not palette_rgb:
+            return None
 
-        indices = bytes(list(img.getdata()))  # 400 bytes, values 0..PAL_MAX-1
-        return indices, rgb565
+        def nearest_palette_index(color: tuple[int, int, int]) -> int:
+            r, g, b = color
+            return min(
+                range(len(palette_rgb)),
+                key=lambda index: (
+                    (r - palette_rgb[index][0]) ** 2
+                    + (g - palette_rgb[index][1]) ** 2
+                    + (b - palette_rgb[index][2]) ** 2
+                ),
+            )
+
+        frames: list[bytes] = []
+        for colors, visible in prepared:
+            # Shift visible colors by one because palette index 0 means clear.
+            indices = bytearray(PET_CELLS)
+            for pixel, (color, is_visible) in enumerate(zip(colors, visible)):
+                if is_visible:
+                    indices[pixel] = nearest_palette_index(color) + 1
+            frames.append(bytes(indices))
+
+        palette_rgb565 = [0]
+        palette_rgb565.extend(self._rgb565(color) for color in palette_rgb)
+        palette_rgb565.extend([0] * (PAL_MAX - len(palette_rgb565)))
+        return frames, palette_rgb565
 
     def convert(self, png_paths: list[str], hold_ms: int = 200, max_frames: int | None = None) -> bytes | None:
         """
@@ -75,8 +220,8 @@ class PetdexEngine:
         Payload:
           0..1     hold_ms (u16 LE)
           2..3     frame_count (u16 LE)
-          4..23    palette (10 x u16 RGB565 LE)
-          24..     N x 400 byte frame data
+          4..35    palette (16 x u16 RGB565 LE; index 0 transparent)
+          36..     N x 400 byte frame data
         """
         if not png_paths:
             return None
@@ -86,20 +231,10 @@ class PetdexEngine:
         if max_frames is not None:
             paths = paths[:max_frames]
 
-        frames_bytes = []
-        palette_rgb565 = None
-
-        for path in paths:
-            result = self._convert_single(path, palette_rgb565)
-            if result is None:
-                continue
-            indices, pal = result
-            if palette_rgb565 is None:
-                palette_rgb565 = pal
-            frames_bytes.append(indices)
-
-        if not frames_bytes or palette_rgb565 is None:
+        result = self._convert_frames(paths)
+        if result is None:
             return None
+        frames_bytes, palette_rgb565 = result
 
         # Build binary payload
         n_frames = min(len(frames_bytes), PET_MAX_FRAMES)
@@ -143,20 +278,10 @@ class PetdexEngine:
         if not pngs:
             return None
 
-        frames: list[bytes] = []
-        palette_rgb565 = None
-
-        for path in pngs:
-            result = self._convert_single(path, palette_rgb565)
-            if result is None:
-                continue
-            indices, pal = result
-            if palette_rgb565 is None:
-                palette_rgb565 = pal
-            frames.append(indices)
-
-        if not frames or palette_rgb565 is None:
+        result = self._convert_frames(pngs)
+        if result is None:
             return None
+        frames, palette_rgb565 = result
 
         total = len(frames)
         cached: list[bytes] = []
@@ -197,10 +322,8 @@ class PetdexEngine:
             raw = cached[frame_index]
             payload = bytearray()
             payload += struct.pack('<HH', hold_ms, total_frames)
-            # palette is at bytes 4..23 in the cached payload
-            payload += raw[4:24]
-            # frame data at bytes 24..
-            payload += raw[24:]
+            payload += raw[4:PET_BLE_HEADER]
+            payload += raw[PET_BLE_HEADER:]
             return bytes(payload)
 
         return cached[frame_index]
